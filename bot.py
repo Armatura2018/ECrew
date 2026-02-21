@@ -19,9 +19,10 @@ logging.basicConfig(level=logging.INFO)
 # === БАЗА ДАННЫХ (В ПАМЯТИ ДЛЯ ТЕСТА) ===
 admins = {CREATOR_ID}
 known_groups = {}  # chat_id: chat_name
-forum_topics = {}  # chat_id: {thread_id: topic_name} - для сохранения категорий супергрупп
+forum_topics = {}  # chat_id: {thread_id: topic_name}
 events_db = {}     # event_id: {group_id, name, date, time, location, description, creator_id, host_username}
 active_posts = {}  # message_id (в группе): {event_id, group_id, attendees: set()}
+action_logs = {}   # chat_id: ["событие 1", "событие 2"]
 
 # === СОСТОЯНИЯ (FSM) ===
 class CreateEvent(StatesGroup):
@@ -32,6 +33,14 @@ class CreateEvent(StatesGroup):
     waiting_for_location = State()
     waiting_for_description = State()
     confirming = State()
+
+class LogsCreator(StatesGroup):
+    choosing_group = State()
+    choosing_action = State()
+
+class CustomMessage(StatesGroup):
+    waiting_for_text = State()
+    choosing_topic = State()
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def get_pagination_keyboard(items: list, page: int, per_page: int, callback_prefix: str) -> InlineKeyboardBuilder:
@@ -75,7 +84,28 @@ async def check_user_is_admin(chat_id: int, user_id: int) -> bool:
     except:
         return False
 
-# === АДМИНСКИЕ КОМАНДЫ ===
+def log_action(group_id: int, action_text: str):
+    if group_id not in action_logs:
+        action_logs[group_id] = []
+    action_logs[group_id].append(action_text)
+
+# === ОТСЛЕЖИВАНИЕ ГРУПП И ТОПИКОВ ===
+@dp.my_chat_member()
+async def on_bot_added_to_group(event: types.ChatMemberUpdated):
+    if event.new_chat_member.status in ["member", "administrator"]:
+        known_groups[event.chat.id] = event.chat.title
+
+@dp.message(F.forum_topic_created)
+async def track_new_topic(message: types.Message):
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+    topic_name = message.forum_topic_created.name
+    
+    if chat_id not in forum_topics:
+        forum_topics[chat_id] = {}
+    forum_topics[chat_id][thread_id] = topic_name
+
+# === АДМИНСКИЕ КОМАНДЫ (НАЗНАЧЕНИЕ) ===
 @dp.message(Command("add_admin"))
 async def add_admin_cmd(message: types.Message):
     if message.from_user.id != CREATOR_ID:
@@ -87,24 +117,55 @@ async def add_admin_cmd(message: types.Message):
     except:
         await message.answer("Использование: /add_admin <ID_пользователя>")
 
-@dp.my_chat_member()
-async def on_bot_added_to_group(event: types.ChatMemberUpdated):
-    if event.new_chat_member.status in ["member", "administrator"]:
-        known_groups[event.chat.id] = event.chat.title
+# === ПАНЕЛЬ СОЗДАТЕЛЯ: /logs ===
+@dp.message(Command("logs"), F.chat.type == "private")
+async def logs_cmd(message: types.Message, state: FSMContext):
+    if message.from_user.id != CREATOR_ID:
+        return
+    if not known_groups:
+        return await message.answer("Бот пока не добавлен ни в одну группу.")
+        
+    groups_list = list(known_groups.items())
+    kb = get_pagination_keyboard(groups_list, 0, 5, "logsg")
+    await message.answer(" Список всех групп (Логи и управление):", reply_markup=kb.as_markup())
+    await state.set_state(LogsCreator.choosing_group)
 
-# Отслеживание создания новых топиков (категорий) в супергруппах
-@dp.message(F.forum_topic_created)
-async def track_new_topic(message: types.Message):
-    chat_id = message.chat.id
-    thread_id = message.message_thread_id
-    topic_name = message.forum_topic_created.name
+@dp.callback_query(F.data.startswith("logsg_select_"), LogsCreator.choosing_group)
+async def log_group_selected(callback: CallbackQuery, state: FSMContext):
+    group_id = int(callback.data.split("_")[2])
+    group_name = known_groups.get(group_id, "Группа")
+    await state.update_data(target_group_id=group_id)
     
-    if chat_id not in forum_topics:
-        forum_topics[chat_id] = {}
-    forum_topics[chat_id][thread_id] = topic_name
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Посмотреть логи", callback_data="logs_view")
+    builder.button(text="Отправить сообщение", callback_data="logs_send_msg")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(f"Выбрана группа: **{group_name}**\nЧто нужно сделать?", parse_mode="Markdown", reply_markup=builder.as_markup())
+    await state.set_state(LogsCreator.choosing_action)
 
-# === СОЗДАНИЕ МЕРОПРИЯТИЯ (В ЛИЧКУ БОТУ) ===
-# Здесь код остался без изменений, так как в ЛС пишут только админы бота
+@dp.callback_query(F.data == "logs_view", LogsCreator.choosing_action)
+async def view_logs(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    group_id = data['target_group_id']
+    logs = action_logs.get(group_id, [])
+    
+    if not logs:
+        text = " Логи пусты. Для этой группы еще ничего не создавалось."
+    else:
+        text = " **Логи группы:**\n\n" + "\n".join(logs)
+        
+    await callback.message.edit_text(text, parse_mode="Markdown")
+    await state.clear()
+    await callback.answer()
+
+@dp.callback_query(F.data == "logs_send_msg", LogsCreator.choosing_action)
+async def start_custom_msg_creator(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("Напишите сообщение, которое нужно отправить в группу от имени бота:")
+    await state.set_state(CustomMessage.waiting_for_text)
+    await callback.answer()
+
+# === ПАНЕЛЬ УПРАВЛЕНИЯ (/start В ЛС ДЛЯ АДМИНОВ И СОЗДАТЕЛЯ) ===
 @dp.message(CommandStart(), F.chat.type == "private")
 async def start_cmd(message: types.Message, state: FSMContext):
     if message.from_user.id not in admins:
@@ -122,7 +183,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
     await state.update_data(admin_groups=admin_groups)
     kb = get_pagination_keyboard(admin_groups, 0, 5, "group")
-    await message.answer("Выберите группу для управления мероприятиями:", reply_markup=kb.as_markup())
+    await message.answer("Выберите группу, где вы администратор:", reply_markup=kb.as_markup())
     await state.set_state(CreateEvent.choosing_group)
 
 @dp.callback_query(F.data.startswith("group_select_"), CreateEvent.choosing_group)
@@ -132,20 +193,88 @@ async def group_selected(callback: CallbackQuery, state: FSMContext):
     await state.update_data(selected_group=group_id, group_name=group_name)
     
     group_events = [e for e in events_db.values() if e["group_id"] == group_id]
-    text = f"Выбрана группа: **{group_name}**\n\n"
-    if not group_events:
-        text += "Запланированных мероприятий нет.\n"
-    else:
-        text += f"Всего мероприятий: {len(group_events)}\n"
-        
-    text += "Напишите /create для создания нового."
-    await callback.message.edit_text(text, parse_mode="Markdown")
+    text = f"Выбрана группа: **{group_name}**\n"
+    text += f"Всего запланированных мероприятий: {len(group_events)}\n\nВыберите действие:"
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text=" Создать мероприятие", callback_data="admin_create_event")
+    builder.button(text=" Отправить сообщение", callback_data="admin_send_msg")
+    builder.adjust(1)
+
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
     await callback.answer()
 
+# === ОТПРАВКА ПРОИЗВОЛЬНЫХ СООБЩЕНИЙ В ГРУППУ (АДМИНЫ И СОЗДАТЕЛЬ) ===
+@dp.callback_query(F.data == "admin_send_msg", CreateEvent.choosing_group)
+async def start_custom_msg_admin(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(target_group_id=data['selected_group'])
+    await callback.message.edit_text("Напишите сообщение, которое нужно отправить от имени бота:")
+    await state.set_state(CustomMessage.waiting_for_text)
+    await callback.answer()
+
+@dp.message(CustomMessage.waiting_for_text)
+async def custom_msg_text_received(message: types.Message, state: FSMContext):
+    await state.update_data(msg_text=message.text)
+    data = await state.get_data()
+    group_id = data['target_group_id']
+    
+    try:
+        chat = await bot.get_chat(group_id)
+        if chat.is_forum:
+            topics = forum_topics.get(group_id, {})
+            builder = InlineKeyboardBuilder()
+            builder.button(text="В текущую / Общую", callback_data="send_custom_0")
+            for th_id, th_name in topics.items():
+                builder.button(text=th_name, callback_data=f"send_custom_{th_id}")
+            builder.adjust(1)
+            
+            await message.answer("Группа является форумом. Выберите категорию (топик):", reply_markup=builder.as_markup())
+            await state.set_state(CustomMessage.choosing_topic)
+            return
+    except:
+        pass # Если не удалось проверить статус форума, шлем как обычно
+        
+    # Отправка в обычную группу
+    try:
+        await bot.send_message(group_id, message.text)
+        await message.answer("✅ Сообщение успешно отправлено в группу!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {e}")
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("send_custom_"), CustomMessage.choosing_topic)
+async def custom_msg_topic_selected(callback: CallbackQuery, state: FSMContext):
+    thread_id = int(callback.data.split("_")[2])
+    data = await state.get_data()
+    group_id = data['target_group_id']
+    text = data['msg_text']
+    
+    try:
+        await bot.send_message(
+            group_id, 
+            text, 
+            message_thread_id=thread_id if thread_id != 0 else None
+        )
+        await callback.message.edit_text("✅ Сообщение успешно отправлено в выбранную категорию!")
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка отправки: {e}")
+    
+    await state.clear()
+    await callback.answer()
+
+# === СОЗДАНИЕ МЕРОПРИЯТИЯ ===
+@dp.callback_query(F.data == "admin_create_event", CreateEvent.choosing_group)
 @dp.message(Command("create"), CreateEvent.choosing_group)
-async def start_creation(message: types.Message, state: FSMContext):
+async def start_creation(update: types.Message | CallbackQuery, state: FSMContext):
     await state.set_state(CreateEvent.waiting_for_name)
-    await message.answer("Введите название мероприятия:", reply_markup=get_cancel_skip_kb(allow_skip=False))
+    msg = update.message if isinstance(update, CallbackQuery) else update
+    
+    if isinstance(update, CallbackQuery):
+        await update.message.edit_text("Введите название мероприятия:", reply_markup=get_cancel_skip_kb(allow_skip=False))
+        await update.answer()
+    else:
+        await msg.answer("Введите название мероприятия:", reply_markup=get_cancel_skip_kb(allow_skip=False))
 
 @dp.callback_query(F.data == "create_cancel", StateFilter(CreateEvent))
 async def cancel_creation(callback: CallbackQuery, state: FSMContext):
@@ -214,9 +343,11 @@ async def process_creation_step(message: types.Message, state: FSMContext, is_sk
 async def finalize_event(callback: CallbackQuery, state: FSMContext):
     if callback.data == "confirm_event":
         data = await state.get_data()
+        group_id = data['selected_group']
         event_id = len(events_db) + 1
+        
         events_db[event_id] = {
-            "group_id": data['selected_group'],
+            "group_id": group_id,
             "name": data['name'],
             "date": data['date'],
             "time": data['time'],
@@ -224,14 +355,17 @@ async def finalize_event(callback: CallbackQuery, state: FSMContext):
             "description": data['description'],
             "host": data['host']
         }
-        await callback.message.edit_text(f"Мероприятие для группы {data['group_name']} создано!")
+        
+        # ЗАПИСЬ В ЛОГИ
+        log_action(group_id, f"✅ **Создано мероприятие:** {data['name']}")
+        await callback.message.edit_text(f"Мероприятие для группы {data['group_name']} успешно создано!")
     else:
         await callback.message.edit_text("Создание отменено.")
         
     await state.set_state(CreateEvent.choosing_group)
     await callback.answer()
 
-# === РАБОТА В ГРУППЕ ===
+# === РАБОТА В ГРУППЕ (/events, /finish) ===
 @dp.message(Command("events"), F.chat.type.in_(["group", "supergroup"]))
 async def group_events_cmd(message: types.Message):
     await message.delete()
@@ -249,7 +383,6 @@ async def group_events_cmd(message: types.Message):
     kb = get_pagination_keyboard(group_events, 0, 5, "post_event")
     await message.answer("Выберите мероприятие для публикации:", reply_markup=kb.as_markup())
 
-# Выбор мероприятия из списка
 @dp.callback_query(F.data.startswith("post_event_select_"))
 async def choose_topic_for_event(callback: CallbackQuery):
     if not await check_user_is_admin(callback.message.chat.id, callback.from_user.id):
@@ -257,22 +390,17 @@ async def choose_topic_for_event(callback: CallbackQuery):
 
     event_id = int(callback.data.split("_")[3])
     
-    # Если это форум (супергруппа с топиками)
     if callback.message.chat.is_forum:
         topics = forum_topics.get(callback.message.chat.id, {})
         builder = InlineKeyboardBuilder()
         builder.button(text="В текущую / Общую", callback_data=f"send_ev_{event_id}_0")
-        
         for th_id, th_name in topics.items():
             builder.button(text=th_name, callback_data=f"send_ev_{event_id}_{th_id}")
-            
         builder.adjust(1)
         await callback.message.edit_text("Выберите категорию (топик) для отправки:", reply_markup=builder.as_markup())
     else:
-        # Если обычная группа, отправляем сразу
         await send_event_announcement(callback, event_id, None)
 
-# Отправка в выбранный топик
 @dp.callback_query(F.data.startswith("send_ev_"))
 async def process_send_event(callback: CallbackQuery):
     if not await check_user_is_admin(callback.message.chat.id, callback.from_user.id):
@@ -281,7 +409,6 @@ async def process_send_event(callback: CallbackQuery):
     parts = callback.data.split("_")
     event_id = int(parts[2])
     thread_id = int(parts[3])
-    
     await send_event_announcement(callback, event_id, thread_id if thread_id != 0 else None)
 
 async def send_event_announcement(callback: CallbackQuery, event_id: int, thread_id: Optional[int]):
@@ -302,21 +429,15 @@ async def send_event_announcement(callback: CallbackQuery, event_id: int, thread
     
     await callback.message.delete()
     sent_msg = await bot.send_message(
-        callback.message.chat.id, 
-        text, 
-        reply_markup=builder.as_markup(), 
-        parse_mode="Markdown",
-        message_thread_id=thread_id
+        callback.message.chat.id, text, reply_markup=builder.as_markup(), 
+        parse_mode="Markdown", message_thread_id=thread_id
     )
     
     active_posts[sent_msg.message_id] = {
-        "event_id": event_id,
-        "group_id": callback.message.chat.id,
-        "attendees": {}
+        "event_id": event_id, "group_id": callback.message.chat.id, "attendees": {}
     }
     await callback.answer()
 
-# Кнопка участия (доступна всем)
 @dp.callback_query(F.data.startswith("attend_"))
 async def attend_event(callback: CallbackQuery):
     msg_id = callback.message.message_id
@@ -331,7 +452,6 @@ async def attend_event(callback: CallbackQuery):
     active_posts[msg_id]["attendees"][user_id] = mention
     await callback.answer("Вы успешно записались!")
 
-# Завершение
 @dp.message(Command("finish"), F.chat.type.in_(["group", "supergroup"]))
 async def finish_cmd(message: types.Message):
     await message.delete()
@@ -364,10 +484,8 @@ async def choose_topic_for_finish(callback: CallbackQuery):
         topics = forum_topics.get(callback.message.chat.id, {})
         builder = InlineKeyboardBuilder()
         builder.button(text="В текущую / Общую", callback_data=f"send_fin_{msg_id}_0")
-        
         for th_id, th_name in topics.items():
             builder.button(text=th_name, callback_data=f"send_fin_{msg_id}_{th_id}")
-            
         builder.adjust(1)
         await callback.message.edit_text("Выберите категорию для отправки итогов:", reply_markup=builder.as_markup())
     else:
@@ -381,7 +499,6 @@ async def process_send_finish(callback: CallbackQuery):
     parts = callback.data.split("_")
     msg_id = int(parts[2])
     thread_id = int(parts[3])
-    
     await send_finish_message(callback, msg_id, thread_id if thread_id != 0 else None)
 
 async def send_finish_message(callback: CallbackQuery, msg_id: int, thread_id: Optional[int]):
@@ -390,11 +507,12 @@ async def send_finish_message(callback: CallbackQuery, msg_id: int, thread_id: O
         return await callback.answer("Пост не найден.")
         
     event = events_db[post_data["event_id"]]
+    group_id = post_data["group_id"]
     attendees = list(post_data["attendees"].values())
     
     await callback.message.delete() 
     try:
-        await bot.delete_message(callback.message.chat.id, msg_id)
+        await bot.delete_message(group_id, msg_id)
     except:
         pass 
         
@@ -402,18 +520,15 @@ async def send_finish_message(callback: CallbackQuery, msg_id: int, thread_id: O
     if attendees:
         text += "\n".join(attendees)
     else:
-        text += "Никто не записался 😢"
+        text += "Никто не записался"
         
-    await bot.send_message(
-        callback.message.chat.id, 
-        text, 
-        parse_mode="Markdown",
-        message_thread_id=thread_id
-    )
+    await bot.send_message(group_id, text, parse_mode="Markdown", message_thread_id=thread_id)
+    
+    # ЗАПИСЬ В ЛОГИ
+    log_action(group_id, f"🏁 **Завершен сбор на мероприятие:** {event['name']} (Участников: {len(attendees)})")
     del active_posts[msg_id]
     await callback.answer()
 
-# Защита пустых кнопок и перелистывания страниц в группах
 @dp.callback_query(F.data == "ignore")
 async def ignore_callback(callback: CallbackQuery):
     await callback.answer()
@@ -421,10 +536,8 @@ async def ignore_callback(callback: CallbackQuery):
 @dp.callback_query(F.data.regexp(r"^(post_event_page_|finish_post_page_)"))
 async def protect_pagination(callback: CallbackQuery):
     if callback.message.chat.type in ["group", "supergroup"]:
-        if not await check_user_is_admin(callback.message.chat.id, callback.fromuser.id):
+        if not await check_user_is_admin(callback.message.chat.id, callback.from_user.id):
             return await callback.answer("Листать меню могут только администраторы!", show_alert=True)
-    # Здесь можно дописать логику перелистывания (отрисовки следующей страницы)
-    # Для экономии места я просто пропускаю это, но структура кнопок готова
     await callback.answer("Эта страница в разработке (перелистывание).")
 
 async def main():
