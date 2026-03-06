@@ -126,6 +126,22 @@ async def track_topic(message: types.Message):
                          (message.chat.id, message.message_thread_id, message.forum_topic_created.name))
         await db.commit()
 
+# === УПРАВЛЕНИЕ АДМИНАМИ (ТОЛЬКО СОЗДАТЕЛЬ) ===
+@dp.message(Command("add_admin"), F.chat.type == "private")
+async def add_admin_cmd(message: types.Message):
+    if message.from_user.id != CREATOR_ID: return # Тихо игнорируем всех, кроме создателя
+    
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await message.answer("Использование: /add_admin <ID_пользователя>")
+        
+    new_admin_id = int(args[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (new_admin_id,))
+        await db.commit()
+        
+    await message.answer(f"✅ Пользователь {new_admin_id} назначен администратором бота.")
+
 # === ПАНЕЛЬ ЛОГОВ (ТОЛЬКО СОЗДАТЕЛЬ) ===
 @dp.message(Command("logs"), F.chat.type == "private")
 async def logs_cmd(message: types.Message, state: FSMContext):
@@ -249,16 +265,25 @@ async def cancel_ev(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "create_skip", StateFilter(CreateEvent))
 async def skip_step(call: CallbackQuery, state: FSMContext):
-    msg = call.message
-    msg.text = " "
-    msg.from_user = call.from_user
-    await process_step(msg, state, True)
+    # Проверяем права именно того, кто нажал на кнопку
+    if not await is_admin(call.from_user.id): 
+        return await call.answer()
+        
+    await call.answer() # Убирает "часики" (анимацию загрузки) с кнопки
+    # Передаем управление дальше, явно указывая пользователя
+    await process_step(call.message, state, is_skip=True, user=call.from_user)
+
 
 @dp.message(StateFilter(CreateEvent.waiting_for_name, CreateEvent.waiting_for_date, 
                         CreateEvent.waiting_for_time, CreateEvent.waiting_for_location, 
                         CreateEvent.waiting_for_description))
-async def process_step(message: types.Message, state: FSMContext, is_skip=False):
-    if not await is_admin(message.from_user.id): return
+async def process_step(message: types.Message, state: FSMContext, is_skip=False, user: types.User = None):
+    # Определяем, кого проверять: если нажата кнопка — берем user, иначе — автора сообщения
+    user_to_check = user if is_skip else message.from_user
+    
+    if not await is_admin(user_to_check.id): 
+        return
+        
     st = await state.get_state()
     val = " " if is_skip else message.text
 
@@ -266,28 +291,41 @@ async def process_step(message: types.Message, state: FSMContext, is_skip=False)
         await state.update_data(name=val)
         await state.set_state(CreateEvent.waiting_for_date)
         await message.answer("Введите дату:", reply_markup=get_cancel_skip_kb())
+        
     elif st == CreateEvent.waiting_for_date.state:
         await state.update_data(date=val)
         await state.set_state(CreateEvent.waiting_for_time)
         await message.answer("Введите время:", reply_markup=get_cancel_skip_kb())
+        
     elif st == CreateEvent.waiting_for_time.state:
         await state.update_data(time=val)
         await state.set_state(CreateEvent.waiting_for_location)
         await message.answer("Место проведения:", reply_markup=get_cancel_skip_kb())
+        
     elif st == CreateEvent.waiting_for_location.state:
         await state.update_data(location=val)
         await state.set_state(CreateEvent.waiting_for_description)
         await message.answer("Описание:", reply_markup=get_cancel_skip_kb())
+        
     elif st == CreateEvent.waiting_for_description.state:
         await state.update_data(description=val)
         data = await state.get_data()
-        host = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+        
+        # Корректно берем имя хоста
+        host = f"@{user_to_check.username}" if user_to_check.username else user_to_check.first_name
         await state.update_data(host=host)
         
-        preview = f"**{data['name']}**\nХост: {host}\nДата: {data.get('date', ' ')}\nВремя: {data.get('time', ' ')}\nМесто: {data.get('location', ' ')}\nОписание: {val}"
+        preview = (f"**{data['name']}**\n"
+                   f"Хост: {host}\n"
+                   f"Дата: {data.get('date', ' ')}\n"
+                   f"Время: {data.get('time', ' ')}\n"
+                   f"Место: {data.get('location', ' ')}\n"
+                   f"Описание: {val}")
+                   
         b = InlineKeyboardBuilder()
         b.button(text="Подтвердить ✅", callback_data="confirm_event")
         b.button(text="Удалить ❌", callback_data="create_cancel")
+        
         await message.answer(f"Предпросмотр:\n\n{preview}", reply_markup=b.as_markup(), parse_mode="Markdown")
         await state.set_state(CreateEvent.confirming)
 
