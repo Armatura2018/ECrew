@@ -311,15 +311,14 @@ async def process_step(message: types.Message, state: FSMContext, is_skip=False,
         await state.update_data(description=val)
         data = await state.get_data()
         
-        # Корректно берем имя хоста
         host = f"@{user_to_check.username}" if user_to_check.username else user_to_check.first_name
         await state.update_data(host=host)
         
-        preview = (f"**{data['name']}**\n"
-                   f"Хост: {host}\n"
-                   f"Дата: {data.get('date', ' ')}\n"
-                   f"Время: {data.get('time', ' ')}\n"
-                   f"Место: {data.get('location', ' ')}\n"
+        preview = (f"**{data['name']}**\n\n"
+                   f"Хост: {host}\n\n"
+                   f"Дата: {data.get('date', ' ')}\n\n"
+                   f"Время: {data.get('time', ' ')}\n\n"
+                   f"Место: {data.get('location', ' ')}\n\n"
                    f"Описание: {val}")
                    
         b = InlineKeyboardBuilder()
@@ -377,11 +376,23 @@ async def send_ev(call: CallbackQuery, eid: int, tid: Optional[int]):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT name, date, time, location, description, host FROM events WHERE id = ?", (eid,)) as c:
             row = await c.fetchone()
-    if not row: return
-    text = f"**{row[0]}**\nХост: {row[5]}\nДата: {row[1]}\nВремя: {row[2]}\nМесто: {row[3]}\nОписание: {row[4]}\n\nНажмите ✅ чтобы записаться."
+            
+    if not row: 
+        return
+        
+    text = (f"**{row[0]}**\n\n"
+            f"Хост: {row[5]}\n\n"
+            f"Дата: {row[1]}\n\n"
+            f"Время: {row[2]}\n\n"
+            f"Место: {row[3]}\n\n"
+            f"Описание: {row[4]}\n\n"
+            f"Нажмите ✅ чтобы записаться.")
+            
     b = InlineKeyboardBuilder().button(text="✅", callback_data=f"att_{eid}")
     await call.message.delete()
+    
     msg = await bot.send_message(call.message.chat.id, text, reply_markup=b.as_markup(), parse_mode="Markdown", message_thread_id=tid)
+    
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO active_posts (message_id, event_id, group_id) VALUES (?, ?, ?)", (msg.message_id, eid, call.message.chat.id))
         await db.commit()
