@@ -314,12 +314,18 @@ async def process_step(message: types.Message, state: FSMContext, is_skip=False,
         host = f"@{user_to_check.username}" if user_to_check.username else user_to_check.first_name
         await state.update_data(host=host)
         
-        preview = (f"**{data['name']}**\n\n"
-                   f"Хост: {host}\n\n"
-                   f"Дата: {data.get('date', ' ')}\n\n"
-                   f"Время: {data.get('time', ' ')}\n\n"
-                   f"Место: {data.get('location', ' ')}\n\n"
-                   f"Описание: {val}")
+        # Используем тройные кавычки для железобетонных отступов
+        preview = f"""**{data['name']}**
+
+Хост: {host}
+
+Дата: {data.get('date', ' ')}
+
+Время: {data.get('time', ' ')}
+
+Место: {data.get('location', ' ')}
+
+Описание: {val}"""
                    
         b = InlineKeyboardBuilder()
         b.button(text="Подтвердить ✅", callback_data="confirm_event")
@@ -380,13 +386,19 @@ async def send_ev(call: CallbackQuery, eid: int, tid: Optional[int]):
     if not row: 
         return
         
-    text = (f"**{row[0]}**\n\n"
-            f"Хост: {row[5]}\n\n"
-            f"Дата: {row[1]}\n\n"
-            f"Время: {row[2]}\n\n"
-            f"Место: {row[3]}\n\n"
-            f"Описание: {row[4]}\n\n"
-            f"Нажмите ✅ чтобы записаться.")
+    text = f"""**{row[0]}**
+
+Хост: {row[5]}
+
+Дата: {row[1]}
+
+Время: {row[2]}
+
+Место: {row[3]}
+
+Описание: {row[4]}
+
+Нажмите ✅ чтобы записаться."""
             
     b = InlineKeyboardBuilder().button(text="✅", callback_data=f"att_{eid}")
     await call.message.delete()
@@ -475,4 +487,9 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+
+    asyncio.run(main())
+
+if __name__ == "__main__":
+
     asyncio.run(main())
