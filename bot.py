@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramForbiddenError
 import aiosqlite
 
 # === НАСТРОЙКИ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8373494520:AAEyyfltaGAxhnRPOkjebO5LL9GS5eG78go") # Вставь свой токен сюда
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8622961253:AAFvKrRee6pcnbscWRjhU-VebuZowbMM9eY") # Вставь свой токен сюда
 CREATOR_ID = 7616343249 # Вставь свой ID сюда
 DB_PATH = os.getenv("DATABASE_PATH", "data/airline_bot.db")
 
