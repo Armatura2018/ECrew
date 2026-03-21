@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramForbiddenError
 import aiosqlite
 
 # === НАСТРОЙКИ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8622961253:AAFvKrRee6pcnbscWRjhU-VebuZowbMM9eY") # Вставь свой токен сюда
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8622961253:AAEkR6VSv3WnLKjNJ19eJkPjmM9dfLz5jB8") # Вставь свой токен сюда
 CREATOR_ID = 7616343249 # Вставь свой ID сюда
 DB_PATH = os.getenv("DATABASE_PATH", "data/airline_bot.db")
 
@@ -309,6 +309,37 @@ async def cmd_trainees(message: types.Message):
     text = "\n".join(lines)
     # Если список слишком большой, разбиваем (в рамках ТЗ отправляем целиком, Telegram вмещает до 4096 символов)
     await message.answer(text[:4096])
+
+
+@dp.message(CommandStart(), F.chat.type == "private")
+async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    
+    # Если зашел создатель
+    if await is_creator(user_id):
+        return await message.answer(
+            "Привет, Создатель! 👑\n"
+            "Твои команды:\n"
+            "/add_head <ID> - назначить главного админа\n"
+            "/create - создать слот"
+        )
+        
+    # Проверяем, есть ли человек в базе
+    data = await get_user_data(user_id)
+    if not data or data[3] == 0:
+        return await message.answer("Доступ закрыт. Вы не числитесь в системе авиакомпании.")
+        
+    role, dept, stage, active = data
+    
+    if role == 'trainee':
+        await message.answer(
+            f"Добро пожаловать в систему, стажер!\n"
+            f"Департамент: {dept}\n"
+            f"Ваш этап: {stage}\n\n"
+            "Используйте /profile, /interview или /training"
+        )
+    else:
+        await message.answer("Добро пожаловать в панель управления персоналом. Введите /create для планирования.")
 
 # === СОЗДАНИЕ МЕРОПРИЯТИЙ (ДЛЯ ВСЕХ АДМИНОВ) ===
 @dp.message(Command("create"), F.chat.type == "private")
