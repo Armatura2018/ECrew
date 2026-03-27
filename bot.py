@@ -476,7 +476,7 @@ async def cmd_interview(message: types.Message):
         async with db.execute("SELECT id, date, time FROM events WHERE type = 'interview'") as c:
             events = await c.fetchall()
             
-    if not events:
+    if not events:FF
         return await message.answer("Свободные слоты для интервью отсутствуют.")
         
     items = [(e[0], f"{e[1]} в {e[2]}") for e in events]
@@ -549,6 +549,132 @@ async def paginate_books(call: CallbackQuery):
     # либо повторного запроса к БД. Выведет сообщение, если страниц больше одной).
     await call.answer("Страница загружается...")
 
+from datetime import datetime
+
+@dp.message(Command("my_bookings"), F.chat.type == "private")
+async def cmd_my_bookings(message: types.Message):
+    uid = message.from_user.id
+    if not await is_active_trainee(uid): return
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""SELECT e.id, e.type, e.date, e.time 
+                                 FROM events e JOIN bookings b ON e.id = b.event_id 
+                                 WHERE b.user_id = ?""", (uid,)) as c:
+            bookings = await c.fetchall()
+            
+    if not bookings:
+        return await message.answer("У вас нет активных записей.")
+        
+    for eid, etype, edate, etime in bookings:
+        name = "Интервью" if etype == "interview" else "Тренинг"
+        b = InlineKeyboardBuilder()
+        b.button(text="Отменить запись ❌", callback_data=f"cancelbook_{eid}")
+        await message.answer(f"{name} | {edate} в {etime}", reply_markup=b.as_markup())
+
+@dp.callback_query(F.data.startswith("cancelbook_"))
+async def process_cancel_booking(call: CallbackQuery):
+    eid = int(call.data.split("_")[1])
+    uid = call.from_user.id
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM bookings WHERE event_id = ? AND user_id = ?", (eid, uid))
+        await db.commit()
+        
+    await call.message.edit_text("Вы успешно отменили свою запись на это мероприятие.")
+
+@dp.message(Command("my_events"), F.chat.type == "private")
+async def cmd_my_events(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    host = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, type, date, time FROM events WHERE host_name = ?", (host,)) as c:
+            events = await c.fetchall()
+            
+    if not events:
+        return await message.answer("У вас нет созданных мероприятий.")
+        
+    for eid, etype, edate, etime in events:
+        name = "Интервью" if etype == "interview" else "Тренинг"
+        b = InlineKeyboardBuilder()
+        b.button(text="Кто записался? 👥", callback_data=f"viewevent_{eid}")
+        b.button(text="Удалить слот 🗑", callback_data=f"delevent_{eid}")
+        b.adjust(1)
+        await message.answer(f"Слот: {name} | {edate} в {etime}", reply_markup=b.as_markup())
+
+@dp.callback_query(F.data.startswith("viewevent_"))
+async def process_view_event(call: CallbackQuery):
+    eid = int(call.data.split("_")[1])
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM bookings WHERE event_id = ?", (eid,)) as c:
+            users = await c.fetchall()
+            
+    if not users:
+        return await call.answer("Пока никто не записался.", show_alert=True)
+        
+    text = "Список записавшихся (ID):\n" + "\n".join([str(u[0]) for u in users])
+    await call.message.answer(text)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("delevent_"))
+async def process_delete_event(call: CallbackQuery):
+    eid = int(call.data.split("_")[1])
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM events WHERE id = ?", (eid,))
+        await db.execute("DELETE FROM bookings WHERE event_id = ?", (eid,))
+        await db.commit()
+        
+    await call.message.edit_text("Слот успешно удален, все записи на него аннулированы.")
+
+def is_event_actual(date_str: str, time_str: str) -> bool:
+    try:
+        event_dt = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
+        return event_dt > datetime.now()
+    except ValueError:
+        return True 
+
+# Эти две функции нужно заменить в твоем коде, чтобы работало скрытие по времени
+@dp.message(Command("interview"), F.chat.type == "private")
+async def cmd_interview(message: types.Message):
+    data = await get_user_data(message.from_user.id)
+    if not data or data[0] != 'trainee' or data[3] == 0: return
+    if data[2] != 'Интервью':
+        return await message.answer("Доступ отклонен. Ваш текущий этап не соответствует данному запросу.")
+        
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, date, time FROM events WHERE type = 'interview'") as c:
+            events = await c.fetchall()
+            
+    actual_events = [e for e in events if is_event_actual(e[1], e[2])]
+            
+    if not actual_events:
+        return await message.answer("Свободные слоты для интервью отсутствуют.")
+        
+    items = [(e[0], f"{e[1]} в {e[2]}") for e in actual_events]
+    await message.answer("Доступные слоты для интервью:", reply_markup=get_pagination_kb(items, 0, 5, "book"))
+
+@dp.message(Command("training"), F.chat.type == "private")
+async def cmd_training(message: types.Message):
+    data = await get_user_data(message.from_user.id)
+    if not data or data[0] != 'trainee' or data[3] == 0: return
+    if data[2] != 'Тренинг':
+        return await message.answer("Доступ отклонен. Ваш текущий этап не соответствует данному запросу.")
+        
+    dept = data[1]
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, date, time FROM events WHERE type = 'training' AND department = ?", (dept,)) as c:
+            events = await c.fetchall()
+            
+    actual_events = [e for e in events if is_event_actual(e[1], e[2])]
+            
+    if not actual_events:
+        return await message.answer("Свободные слоты для тренингов отсутствуют.")
+        
+    items = [(e[0], f"{e[1]} в {e[2]}") for e in actual_events]
+    await message.answer("Доступные слоты для тренинга:", reply_markup=get_pagination_kb(items, 0, 5, "book"))
+    
 # === ЗАПУСК ===
 async def main():
     await init_db()
