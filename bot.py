@@ -302,13 +302,15 @@ async def cmd_trainees(message: types.Message):
     if not rows:
         return await message.answer("Активные стажеры отсутствуют.")
         
-    lines = ["Список стажеров:"]
+    lines = ["<b>Список стажеров:</b>\n"]
     for uid, dept, stage in rows:
-        lines.append(f"ID: {uid} | Департамент: {dept} | Этап: {stage}")
+        # Создаем кликабельную ссылку. Текст будет "Профиль", при нажатии откроется профиль пользователя
+        lines.append(f"👤 <a href='tg://user?id={uid}'>Профиль стажера</a> (ID: <code>{uid}</code>)\nДепартамент: {dept} | Этап: {stage}\n")
         
     text = "\n".join(lines)
-    # Если список слишком большой, разбиваем (в рамках ТЗ отправляем целиком, Telegram вмещает до 4096 символов)
-    await message.answer(text[:4096])
+    
+    # Обязательно добавляем parse_mode="HTML", чтобы Telegram понял, что это ссылка
+    await message.answer(text[:4096], parse_mode="HTML")
 
 
 @dp.message(CommandStart(), F.chat.type == "private")
