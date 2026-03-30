@@ -686,5 +686,5 @@ async def main():
     await set_main_menu(bot)
     await dp.start_polling(bot)
 
-if name == "main":
+if __name__ == "__main__":
     asyncio.run(main())
