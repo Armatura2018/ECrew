@@ -473,15 +473,13 @@ async def cmd_interview(message: types.Message):
     if not data or data[0] != 'trainee' or data[3] == 0: return
     if data[2] != 'Интервью':
         return await message.answer("Доступ отклонен. Ваш текущий этап не соответствует данному запросу.")
-        
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, date, time FROM events WHERE type = 'interview'") as c:
             events = await c.fetchall()
-            
-    if not events:FF
+    actual_events = [e for e in events if is_event_actual(e[1], e[2])]
+    if not actual_events:
         return await message.answer("Свободные слоты для интервью отсутствуют.")
-        
-    items = [(e[0], f"{e[1]} в {e[2]}") for e in events]
+    items = [(e[0], f"{e[1]} в {e[2]}") for e in actual_events]
     await message.answer("Доступные слоты для интервью:", reply_markup=get_pagination_kb(items, 0, 5, "book"))
 
 @dp.message(Command("training"), F.chat.type == "private")
@@ -490,16 +488,14 @@ async def cmd_training(message: types.Message):
     if not data or data[0] != 'trainee' or data[3] == 0: return
     if data[2] != 'Тренинг':
         return await message.answer("Доступ отклонен. Ваш текущий этап не соответствует данному запросу.")
-        
     dept = data[1]
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, date, time FROM events WHERE type = 'training' AND department = ?", (dept,)) as c:
             events = await c.fetchall()
-            
-    if not events:
+    actual_events = [e for e in events if is_event_actual(e[1], e[2])]
+    if not actual_events:
         return await message.answer("Свободные слоты для тренингов отсутствуют.")
-        
-    items = [(e[0], f"{e[1]} в {e[2]}") for e in events]
+    items = [(e[0], f"{e[1]} в {e[2]}") for e in actual_events]
     await message.answer("Доступные слоты для тренинга:", reply_markup=get_pagination_kb(items, 0, 5, "book"))
 
 @dp.callback_query(F.data.startswith("book_select_"))
