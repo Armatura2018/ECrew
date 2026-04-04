@@ -41,6 +41,10 @@ class CreateEvent(StatesGroup):
     waiting_for_description = State()
     confirming = State()
 
+class RequestEvent(StatesGroup):
+    waiting_for_dept = State()
+    waiting_for_datetime = State()
+
 # === БАЗА ДАННЫХ ===
 async def init_db():
     db_file = Path(DB_PATH)
@@ -78,6 +82,20 @@ async def init_db():
         
         # Добавляем базовый текст экзамена, если его нет
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('exam_text', 'Ссылка на экзамен пока не задана.')")
+        # Пытаемся добавить колонку username, если её еще нет
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        except Exception:
+            pass # Если колонка уже есть, идем дальше
+            
+        # Таблица для запросов
+        await db.execute("""CREATE TABLE IF NOT EXISTS requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            department TEXT,
+            type TEXT,
+            datetime TEXT
+        )""")
         await db.commit()
 
 # === ПРОВЕРКИ ПРАВ ===
@@ -296,21 +314,41 @@ async def cmd_trainees(message: types.Message):
     if not await is_admin(message.from_user.id): return
     
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id, department, stage FROM users WHERE role = 'trainee' AND is_active = 1") as c:
+        async with db.execute("SELECT user_id, department, stage, username FROM users WHERE role = 'trainee' AND is_active = 1") as c:
             rows = await c.fetchall()
             
     if not rows:
         return await message.answer("Активные стажеры отсутствуют.")
         
     lines = ["<b>Список стажеров:</b>\n"]
-    for uid, dept, stage in rows:
-        # Создаем кликабельную ссылку. Текст будет "Профиль", при нажатии откроется профиль пользователя
-        lines.append(f"👤 <a href='tg://user?id={uid}'>Профиль стажера</a> (ID: <code>{uid}</code>)\nДепартамент: {dept} | Этап: {stage}\n")
+    for uid, dept, stage, username in rows:
+        display_name = username if username else "Имя не загружено (/update)"
+        lines.append(f"👤 <a href='tg://user?id={uid}'>{display_name}</a>\nДепартамент: {dept} | Этап: {stage}\n")
         
     text = "\n".join(lines)
-    
-    # Обязательно добавляем parse_mode="HTML", чтобы Telegram понял, что это ссылка
     await message.answer(text[:4096], parse_mode="HTML")
+
+@dp.message(Command("update"), F.chat.type == "private")
+async def cmd_update(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    await message.answer("Начинаю обновление никнеймов стажеров. Это может занять несколько секунд...")
+    
+    updated = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM users WHERE role = 'trainee' AND is_active = 1") as c:
+            users = await c.fetchall()
+            
+        for (uid,) in users:
+            try:
+                chat = await bot.get_chat(uid)
+                name = f"@{chat.username}" if chat.username else chat.first_name
+                await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (name, uid))
+                updated += 1
+            except Exception:
+                pass # Если пользователь заблокировал бота, пропускаем
+        await db.commit()
+        
+    await message.answer(f"Обновление завершено! Обновлено профилей: {updated}.")
 
 
 @dp.message(CommandStart(), F.chat.type == "private")
@@ -543,9 +581,33 @@ async def ignore_cb(call: CallbackQuery):
 
 @dp.callback_query(F.data.regexp(r"^book_page_"))
 async def paginate_books(call: CallbackQuery):
-    # Логика перелистывания (в рамках ТЗ оставлена заглушка, так как требует хранения полного списка в FSM, 
-    # либо повторного запроса к БД. Выведет сообщение, если страниц больше одной).
-    await call.answer("Страница загружается...")
+    page = int(call.data.split("_")[2])
+    uid = call.from_user.id
+    data = await get_user_data(uid)
+    
+    if not data or data[0] != 'trainee' or data[3] == 0: 
+        return await call.answer("Доступ закрыт.", show_alert=True)
+        
+    dept = data[1]
+    stage = data[2]
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        if stage == 'Интервью':
+            async with db.execute("SELECT id, date, time FROM events WHERE type = 'interview'") as c:
+                events = await c.fetchall()
+        elif stage == 'Тренинг':
+            async with db.execute("SELECT id, date, time FROM events WHERE type = 'training' AND department = ?", (dept,)) as c:
+                events = await c.fetchall()
+        else:
+            return await call.answer("Нет доступных мероприятий.", show_alert=True)
+            
+    actual_events = [e for e in events if is_event_actual(e[1], e[2])]
+    items = [(e[0], f"{e[1]} в {e[2]}") for e in actual_events]
+    
+    if not items:
+        return await call.answer("Доступных слотов больше нет.", show_alert=True)
+        
+    await call.message.edit_reply_markup(reply_markup=get_pagination_kb(items, page, 5, "book"))
 
 from datetime import datetime
 
@@ -653,6 +715,100 @@ async def cmd_interview(message: types.Message):
     items = [(e[0], f"{e[1]} в {e[2]}") for e in actual_events]
     await message.answer("Доступные слоты для интервью:", reply_markup=get_pagination_kb(items, 0, 5, "book"))
 
+# --- ЗАПРОСЫ ОТ СТАЖЕРОВ ---
+@dp.message(Command("request"), F.chat.type == "private")
+async def cmd_request(message: types.Message, state: FSMContext):
+    data = await get_user_data(message.from_user.id)
+    if not data or data[0] != 'trainee' or data[3] == 0: return
+    
+    stage = data[2]
+    if stage not in ['Интервью', 'Тренинг']:
+        return await message.answer("Ваш текущий этап обучения не позволяет создавать запросы.")
+        
+    await state.update_data(stage=stage)
+    await message.answer("Выберите ваш департамент:", reply_markup=get_departments_kb("reqdept"))
+    await state.set_state(RequestEvent.waiting_for_dept)
+    
+@dp.callback_query(F.data.startswith("reqdept_"), RequestEvent.waiting_for_dept)
+async def process_req_dept(call: CallbackQuery, state: FSMContext):
+    dept_map = {"reqdept_pilots": "Пилоты", "reqdept_ground": "Наземные службы", "reqdept_cabin": "Бортпроводники"}
+    await state.update_data(department=dept_map.get(call.data))
+    await call.message.edit_text("Укажите желаемую дату и время слота (например: 15.05.2026 18:00):")
+    await state.set_state(RequestEvent.waiting_for_datetime)
+    
+@dp.message(RequestEvent.waiting_for_datetime)
+async def process_req_datetime(message: types.Message, state: FSMContext):
+    dt = message.text
+    data = await state.get_data()
+    etype = 'interview' if data['stage'] == 'Интервью' else 'training'
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO requests (user_id, department, type, datetime) VALUES (?, ?, ?, ?)",
+                         (message.from_user.id, data['department'], etype, dt))
+        await db.commit()
+        
+    await message.answer("Ваш запрос успешно отправлен администраторам!")
+    await state.clear()
+
+# --- ПРОСМОТР ЗАПРОСОВ ДЛЯ АДМИНОВ ---
+@dp.message(Command("requests"), F.chat.type == "private")
+async def cmd_requests_admin(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    await message.answer("Выберите департамент для просмотра запросов:", reply_markup=get_departments_kb("viewreq"))
+
+@dp.callback_query(F.data.startswith("viewreq_"))
+async def view_requests_dept(call: CallbackQuery):
+    dept_map = {"viewreq_pilots": "Пилоты", "viewreq_ground": "Наземные службы", "viewreq_cabin": "Бортпроводники"}
+    dept = dept_map.get(call.data)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, type, datetime FROM requests WHERE department = ?", (dept,)) as c:
+            reqs = await c.fetchall()
+            
+    if not reqs:
+        return await call.message.edit_text(f"В департаменте '{dept}' активных запросов нет.")
+        
+    b = InlineKeyboardBuilder()
+    for rid, rtype, rdt in reqs:
+        t_name = "Интервью" if rtype == "interview" else "Тренинг"
+        b.button(text=f"{t_name} | {rdt}", callback_data=f"reqinfo_{rid}")
+    b.adjust(1)
+    await call.message.edit_text(f"Запросы ({dept}):", reply_markup=b.as_markup())
+
+@dp.callback_query(F.data.startswith("reqinfo_"))
+async def view_request_info(call: CallbackQuery):
+    rid = int(call.data.split("_")[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""SELECT r.type, r.datetime, u.username, u.user_id 
+                                 FROM requests r LEFT JOIN users u ON r.user_id = u.user_id 
+                                 WHERE r.id = ?""", (rid,)) as c:
+            req = await c.fetchone()
+            
+    if not req: return await call.answer("Запрос не найден.", show_alert=True)
+    rtype, rdt, username, uid = req
+    t_name = "Интервью" if rtype == "interview" else "Тренинг"
+    name_display = username if username else "Неизвестный (/update)"
+    
+    text = f"<b>Запрос на:</b> {t_name}\n<b>Дата и время:</b> {rdt}\n<b>Запросил:</b> 👤 <a href='tg://user?id={uid}'>{name_display}</a>"
+    b = InlineKeyboardBuilder()
+    b.button(text="Удалить запрос 🗑", callback_data=f"delreq_{rid}")
+    b.button(text="Назад к департаментам", callback_data="backreqs")
+    b.adjust(1)
+    
+    await call.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("delreq_"))
+async def delete_request(call: CallbackQuery):
+    rid = int(call.data.split("_")[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM requests WHERE id = ?", (rid,))
+        await db.commit()
+    await call.message.edit_text("Запрос успешно удален.")
+    
+@dp.callback_query(F.data == "backreqs")
+async def back_to_requests(call: CallbackQuery):
+    await call.message.edit_text("Выберите департамент для просмотра запросов:", reply_markup=get_departments_kb("viewreq"))
+
 @dp.message(Command("training"), F.chat.type == "private")
 async def cmd_training(message: types.Message):
     data = await get_user_data(message.from_user.id)
@@ -678,6 +834,7 @@ async def set_main_menu(bot: Bot):
         types.BotCommand(command="training", description="Доступные тренинги"),
         types.BotCommand(command="interview", description="Запись на интервью"),
         types.BotCommand(command="profile", description="Мой профиль")
+        types.BotCommand(command="request", description="Запросить слот"),
     ]
     await bot.set_my_commands(main_menu_commands)
 
