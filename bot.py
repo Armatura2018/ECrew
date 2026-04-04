@@ -833,8 +833,8 @@ async def set_main_menu(bot: Bot):
     main_menu_commands = [
         types.BotCommand(command="training", description="Доступные тренинги"),
         types.BotCommand(command="interview", description="Запись на интервью"),
-        types.BotCommand(command="profile", description="Мой профиль")
         types.BotCommand(command="request", description="Запросить слот"),
+        types.BotCommand(command="profile", description="Мой профиль")
     ]
     await bot.set_my_commands(main_menu_commands)
 
