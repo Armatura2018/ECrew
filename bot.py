@@ -45,6 +45,13 @@ class RequestEvent(StatesGroup):
     waiting_for_dept = State()
     waiting_for_datetime = State()
 
+class NotifyEvent(StatesGroup):
+    waiting_for_dept = State()
+    waiting_for_type = State()
+
+class EditNotify(StatesGroup):
+    waiting_for_text = State()
+
 # === БАЗА ДАННЫХ ===
 async def init_db():
     db_file = Path(DB_PATH)
@@ -71,6 +78,13 @@ async def init_db():
             description TEXT,
             host_name TEXT
         )""")
+
+        await db.execute("""CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )""")
+        # Установим стандартное сообщение, если его еще нет
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_template', 'Появился новый слот!\nДепартамент: {dept}\nТип: {type}')")
         
         await db.execute("""CREATE TABLE IF NOT EXISTS bookings (
             event_id INTEGER,
@@ -749,6 +763,77 @@ async def process_req_datetime(message: types.Message, state: FSMContext):
         
     await message.answer("Ваш запрос успешно отправлен администраторам!")
     await state.clear()
+
+
+# --- УПРАВЛЕНИЕ УВЕДОМЛЕНИЯМИ ---
+
+@dp.message(Command("edit_notify"), F.chat.type == "private")
+async def cmd_edit_notify(message: types.Message, state: FSMContext):
+    if not await is_admin(message.from_user.id): return
+    await message.answer("Введите новый текст уведомления. Используйте {dept} и {type} для автоматической подстановки параметров:")
+    await state.set_state(EditNotify.waiting_for_text)
+
+@dp.message(EditNotify.waiting_for_text)
+async def process_edit_notify_text(message: types.Message, state: FSMContext):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE settings SET value = ? WHERE key = 'notify_template'", (message.text,))
+        await db.commit()
+    await message.answer("Шаблон уведомления успешно обновлен!")
+    await state.clear()
+
+@dp.message(Command("notify"), F.chat.type == "private")
+async def cmd_notify(message: types.Message, state: FSMContext):
+    if not await is_admin(message.from_user.id): return
+    await message.answer("Для какого департамента новый слот?", reply_markup=get_departments_kb("notifydept"))
+    await state.set_state(NotifyEvent.waiting_for_dept)
+
+@dp.callback_query(F.data.startswith("notifydept_"), NotifyEvent.waiting_for_dept)
+async def process_notify_dept(call: CallbackQuery, state: FSMContext):
+    dept_map = {"notifydept_pilots": "Пилоты", "notifydept_ground": "Наземные службы", "notifydept_cabin": "Бортпроводники"}
+    await state.update_data(dept=dept_map.get(call.data))
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Тренинг", callback_data="notifytype_training")
+    kb.button(text="Собеседование", callback_data="notifytype_interview")
+    kb.adjust(2)
+    
+    await call.message.edit_text("Выберите тип слота:", reply_markup=kb.as_markup())
+    await state.set_state(NotifyEvent.waiting_for_type)
+
+@dp.callback_query(F.data.startswith("notifytype_"), NotifyEvent.waiting_for_type)
+async def process_notify_finish(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    type_name = "Тренинг" if call.data == "notifytype_training" else "Собеседование"
+    dept_name = data['dept']
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key = 'notify_template'") as c:
+            template = await c.fetchone()
+            
+        if not template:
+            return await call.message.edit_text("Ошибка: шаблон уведомления не найден в базе.")
+            
+        # Формируем текст
+        final_text = template[0].format(dept=dept_name, type=type_name)
+        
+        # Получаем список всех активных стажеров
+        async with db.execute("SELECT user_id FROM users WHERE role = 'trainee' AND is_active = 1") as c:
+            trainees = await c.fetchall()
+            
+    await call.message.edit_text(f"Начинаю рассылку для {len(trainees)} стажеров...")
+    
+    count = 0
+    for (uid,) in trainees:
+        try:
+            await bot.send_message(uid, final_text)
+            count += 1
+        except Exception:
+            pass # Пользователь мог заблокировать бота
+            
+    await call.message.answer(f"Уведомление отправлено! Получили: {count} чел.")
+    await state.clear()
+
+
 
 # --- ПРОСМОТР ЗАПРОСОВ ДЛЯ АДМИНОВ ---
 @dp.message(Command("requests"), F.chat.type == "private")
