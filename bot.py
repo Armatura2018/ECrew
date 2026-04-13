@@ -755,13 +755,25 @@ async def process_req_datetime(message: types.Message, state: FSMContext):
     dt = message.text
     data = await state.get_data()
     etype = 'interview' if data['stage'] == 'Интервью' else 'training'
+    etype_rus = "Собеседование" if etype == 'interview' else "Тренинг"
+    
+    # Получаем ник для уведомления создателя
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
     
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO requests (user_id, department, type, datetime) VALUES (?, ?, ?, ?)",
                          (message.from_user.id, data['department'], etype, dt))
         await db.commit()
         
-    await message.answer("Ваш запрос успешно отправлен администраторам!")
+    await message.answer("Ваш запрос успешно отправлен!")
+    
+    # Уведомление создателю (замени CREATOR_ID на свой ID)
+    creator_msg = f"Новый запрос!\nДеп: {data['department']}\nТип: {etype_rus}\nОт: {username}"
+    try:
+        await bot.send_message(CREATOR_ID, creator_msg)
+    except Exception:
+        pass
+        
     await state.clear()
 
 
@@ -803,24 +815,31 @@ async def process_notify_dept(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("notifytype_"), NotifyEvent.waiting_for_type)
 async def process_notify_finish(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    type_name = "Тренинг" if call.data == "notifytype_training" else "Собеседование"
     dept_name = data['dept']
+    # Сопоставляем тип для поиска по этапу в базе
+    if call.data == "notifytype_training":
+        type_name = "Тренинг"
+        stage_search = "Тренинг"
+    else:
+        type_name = "Собеседование"
+        stage_search = "Интервью"
     
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key = 'notify_template'") as c:
             template = await c.fetchone()
-            
-        if not template:
-            return await call.message.edit_text("Ошибка: шаблон уведомления не найден в базе.")
-            
-        # Формируем текст
-        final_text = template[0].format(dept=dept_name, type=type_name)
         
-        # Получаем список всех активных стажеров
-        async with db.execute("SELECT user_id FROM users WHERE role = 'trainee' AND is_active = 1") as c:
+        # Берем только стажеров конкретного департамента на конкретном этапе
+        async with db.execute(
+            "SELECT user_id FROM users WHERE role = 'trainee' AND is_active = 1 AND department = ? AND stage = ?", 
+            (dept_name, stage_search)
+        ) as c:
             trainees = await c.fetchall()
             
-    await call.message.edit_text(f"Начинаю рассылку для {len(trainees)} стажеров...")
+    if not template:
+        return await call.message.edit_text("Ошибка: шаблон не найден.")
+            
+    final_text = template[0].format(dept=dept_name, type=type_name)
+    await call.message.edit_text(f"Рассылка для {dept_name} ({type_name})...")
     
     count = 0
     for (uid,) in trainees:
@@ -828,9 +847,9 @@ async def process_notify_finish(call: CallbackQuery, state: FSMContext):
             await bot.send_message(uid, final_text)
             count += 1
         except Exception:
-            pass # Пользователь мог заблокировать бота
+            pass
             
-    await call.message.answer(f"Уведомление отправлено! Получили: {count} чел.")
+    await call.message.answer(f"Готово! Уведомлено {count} чел. из департамента {dept_name}.")
     await state.clear()
 
 
