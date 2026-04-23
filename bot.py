@@ -52,6 +52,13 @@ class NotifyEvent(StatesGroup):
 class EditNotify(StatesGroup):
     waiting_for_text = State()
 
+class TicketEvent(StatesGroup):
+    waiting_for_question = State()
+    waiting_for_answer = State()
+
+class ExamEvent(StatesGroup):
+    waiting_for_id = State()
+
 # === БАЗА ДАННЫХ ===
 async def init_db():
     db_file = Path(DB_PATH)
@@ -110,6 +117,21 @@ async def init_db():
             type TEXT,
             datetime TEXT
         )""")
+
+        await db.execute("""CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            question TEXT,
+            status TEXT DEFAULT 'open'
+        )""")
+
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pass_msg', 'Уважаемый стажер!
+
+С радостью сообщаем, что Вы успешно прошли все три этапа отборочного процесса. Отдел Кадров высоко оценил Ваш уровень компетенций и опыт, которые в полной мере соответствуют нашим требованиям и ожиданиям. Мы были впечатлены Вашими результатами на каждом из этапов. Для дальнейших инструкций обратитесь @antoninaiivanovna')")
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('fail_msg', 'Уважаемый соискатель!
+
+​Информируем вас, что по результатам экзамена ваша кандидатура не была утверждена департаментом кадров. К сожалению, текущий результат не соответствует установленным требованиям для данной позиции. Вы можете повторно направить заявку на участие в следующем отборочном туре.')")
+        
         await db.commit()
 
 # === ПРОВЕРКИ ПРАВ ===
@@ -337,7 +359,7 @@ async def cmd_trainees(message: types.Message):
     lines = ["<b>Список стажеров:</b>\n"]
     for uid, dept, stage, username in rows:
         display_name = username if username else "Имя не загружено (/update)"
-        lines.append(f"👤 <a href='tg://user?id={uid}'>{display_name}</a>\nДепартамент: {dept} | Этап: {stage}\n")
+        lines.append(f"👤 <a href='tg://user?id={uid}'>{display_name}</a> ({uid})\nДепартамент: {dept} | Этап: {stage}\n")
         
     text = "\n".join(lines)
     await message.answer(text[:4096], parse_mode="HTML")
@@ -853,6 +875,119 @@ async def process_notify_finish(call: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
+# --- ИТОГИ ЭКЗАМЕНА ---
+@dp.message(Command("exam"), F.chat.type == "private")
+async def cmd_exam(message: types.Message, state: FSMContext):
+    if not await is_admin(message.from_user.id): return
+    await message.answer("Введите ID стажера, чтобы вынести решение по экзамену (скопируйте из /trainees):")
+    await state.set_state(ExamEvent.waiting_for_id)
+
+@dp.message(ExamEvent.waiting_for_id)
+async def process_exam_id(message: types.Message, state: FSMContext):
+    uid = message.text.strip()
+    if not uid.isdigit(): 
+        return await message.answer("Ошибка: ID должен состоять только из цифр.")
+        
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Сдал", callback_data=f"examres_pass_{uid}")
+    b.button(text="❌ Не сдал", callback_data=f"examres_fail_{uid}")
+    b.adjust(2)
+    await message.answer(f"Выберите итог для стажера {uid}:", reply_markup=b.as_markup())
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("examres_"))
+async def process_exam_result(call: CallbackQuery):
+    _, res, uid = call.data.split("_")
+    uid = int(uid)
+    
+    key = 'pass_msg' if res == 'pass' else 'fail_msg'
+    new_role = 'passed' if res == 'pass' else 'failed'
+    status_text = "СДАЛ" if res == 'pass' else "НЕ СДАЛ"
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(f"SELECT value FROM settings WHERE key = '{key}'") as c:
+            template = await c.fetchone()
+            msg_text = template[0] if template else ("Итоги экзамена подведены.")
+            
+        # Отключаем стажера (is_active = 0) и меняем роль, чтобы он пропал из списков
+        await db.execute("UPDATE users SET is_active = 0, role = ? WHERE user_id = ?", (new_role, uid))
+        await db.commit()
+        
+    try:
+        await bot.send_message(uid, msg_text)
+        await call.message.edit_text(f"✅ Стажер {uid} получил статус {status_text}.\nИнструкция отправлена, профиль деактивирован.")
+    except Exception:
+        await call.message.edit_text(f"⚠️ Статус {status_text} установлен, но стажер заблокировал бота, сообщение не доставлено.")
+
+
+# --- СИСТЕМА ТИКЕТОВ ---
+@dp.message(Command("support"), F.chat.type == "private")
+async def cmd_support(message: types.Message, state: FSMContext):
+    data = await get_user_data(message.from_user.id)
+    if not data or data[3] == 0: return # Только для активных
+    await message.answer("Опишите вашу проблему или вопрос. Администраторы ответят вам в ближайшее время:")
+    await state.set_state(TicketEvent.waiting_for_question)
+
+@dp.message(TicketEvent.waiting_for_question)
+async def process_ticket_question(message: types.Message, state: FSMContext):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO tickets (user_id, question) VALUES (?, ?)", (message.from_user.id, message.text))
+        await db.commit()
+    await message.answer("✅ Ваш тикет создан! Ожидайте ответа.")
+    
+    # Уведомляем тебя (не забудь, что CREATOR_ID должен быть прописан вверху файла)
+    try:
+        username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+        await bot.send_message(CREATOR_ID, f"🆘 Новый тикет!\nОт: {username} ({message.from_user.id})\nВопрос: {message.text}\nВведите /tickets чтобы ответить.")
+    except Exception:
+        pass
+    await state.clear()
+
+@dp.message(Command("tickets"), F.chat.type == "private")
+async def cmd_tickets(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, user_id, question FROM tickets WHERE status = 'open'") as c:
+            tickets = await c.fetchall()
+            
+    if not tickets: return await message.answer("Открытых тикетов нет 🎉")
+    
+    for tid, uid, q in tickets:
+        b = InlineKeyboardBuilder()
+        b.button(text="Ответить ✍️", callback_data=f"answerticket_{tid}_{uid}")
+        b.button(text="Закрыть ❌", callback_data=f"closeticket_{tid}")
+        b.adjust(2)
+        await message.answer(f"🎫 Тикет #{tid}\nID стажера: {uid}\nВопрос: {q}", reply_markup=b.as_markup())
+
+@dp.callback_query(F.data.startswith("answerticket_"))
+async def answer_ticket(call: CallbackQuery, state: FSMContext):
+    _, tid, uid = call.data.split("_")
+    await state.update_data(ticket_id=tid, user_id=uid)
+    await call.message.edit_text(f"Введите ваш ответ стажеру (Тикет #{tid}):")
+    await state.set_state(TicketEvent.waiting_for_answer)
+
+@dp.message(TicketEvent.waiting_for_answer)
+async def process_ticket_answer(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    tid, uid = data['ticket_id'], data['user_id']
+    try:
+        await bot.send_message(uid, f"👨‍💻 Ответ администратора на ваш тикет:\n\n{message.text}")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (tid,))
+            await db.commit()
+        await message.answer("Ответ отправлен, тикет закрыт.")
+    except Exception:
+        await message.answer("Не удалось отправить ответ. Стажер заблокировал бота.")
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("closeticket_"))
+async def close_ticket(call: CallbackQuery):
+    tid = call.data.split("_")[1]
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (tid,))
+        await db.commit()
+    await call.message.edit_text(f"Тикет #{tid} закрыт без ответа.")
+
 
 # --- ПРОСМОТР ЗАПРОСОВ ДЛЯ АДМИНОВ ---
 @dp.message(Command("requests"), F.chat.type == "private")
@@ -938,7 +1073,8 @@ async def set_main_menu(bot: Bot):
         types.BotCommand(command="training", description="Доступные тренинги"),
         types.BotCommand(command="interview", description="Запись на интервью"),
         types.BotCommand(command="request", description="Запросить слот"),
-        types.BotCommand(command="profile", description="Мой профиль")
+        types.BotCommand(command="profile", description="Мой профиль"),
+        types.BotCommand(command="support", description="Поддержка")
     ]
     await bot.set_my_commands(main_menu_commands)
 
