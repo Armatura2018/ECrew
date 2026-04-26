@@ -1055,7 +1055,7 @@ async def view_request_info(call: CallbackQuery):
     name_display = username if username else "Неизвестный (/update)"
     
     text = f"<b>Запрос на:</b> {t_name}\n<b>Дата и время:</b> {rdt}\n<b>Запросил:</b> 👤 <a href='tg://user?id={uid}'>{name_display}</a>"
-   b = InlineKeyboardBuilder()
+    b = InlineKeyboardBuilder()
     b.button(text="Принять ✅", callback_data=f"acceptreq_{rid}_{uid}")
     b.button(text="Удалить запрос 🗑", callback_data=f"delreq_{rid}")
     b.button(text="Назад", callback_data="backreqs")
