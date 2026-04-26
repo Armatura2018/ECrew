@@ -11,6 +11,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramForbiddenError
+from aiogram.fsm.storage.base import StorageKey
 import aiosqlite
 
 # === НАСТРОЙКИ ===
@@ -55,6 +56,10 @@ class EditNotify(StatesGroup):
 class TicketEvent(StatesGroup):
     waiting_for_question = State()
     waiting_for_answer = State()
+    waiting_for_reply = State()
+
+class RequestAccept(StatesGroup):
+    waiting_for_discord = State()
 
 class ExamEvent(StatesGroup):
     waiting_for_id = State()
@@ -105,9 +110,10 @@ async def init_db():
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('exam_text', 'Ссылка на экзамен пока не задана.')")
         # Пытаемся добавить колонку username, если её еще нет
         try:
-            await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+            await db.execute("ALTER TABLE tickets ADD COLUMN admin_id INTEGER")
         except Exception:
-            pass # Если колонка уже есть, идем дальше
+            pass
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('interview_accept_msg', 'Ваш запрос на собеседование принят! Присоединитесь к нашему стаф-порталу (https://discord.gg/e459Y7GrNX) и напишите ваш ник в Discord для связи:')")
             
         # Таблица для запросов
         await db.execute("""CREATE TABLE IF NOT EXISTS requests (
@@ -958,6 +964,9 @@ async def cmd_tickets(message: types.Message):
 @dp.callback_query(F.data.startswith("answerticket_"))
 async def answer_ticket(call: CallbackQuery, state: FSMContext):
     _, tid, uid = call.data.split("_")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE tickets SET admin_id = ?, status = 'in_progress' WHERE id = ?", (call.from_user.id, tid))
+        await db.commit()
     await state.update_data(ticket_id=tid, user_id=uid)
     await call.message.edit_text(f"Введите ваш ответ стажеру (Тикет #{tid}):")
     await state.set_state(TicketEvent.waiting_for_answer)
@@ -966,23 +975,44 @@ async def answer_ticket(call: CallbackQuery, state: FSMContext):
 async def process_ticket_answer(message: types.Message, state: FSMContext):
     data = await state.get_data()
     tid, uid = data['ticket_id'], data['user_id']
+    b = InlineKeyboardBuilder()
+    b.button(text="Ответить 💬", callback_data=f"replyticket_{tid}")
     try:
-        await bot.send_message(uid, f"👨‍💻 Ответ администратора на ваш тикет:\n\n{message.text}")
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (tid,))
-            await db.commit()
-        await message.answer("Ответ отправлен, тикет закрыт.")
+        await bot.send_message(uid, f"👨‍💻 Ответ администратора (Тикет #{tid}):\n\n{message.text}", reply_markup=b.as_markup())
+        await message.answer(f"Ответ отправлен. Тикет #{tid} остается открытым.")
     except Exception:
-        await message.answer("Не удалось отправить ответ. Стажер заблокировал бота.")
+        await message.answer("Ошибка отправки, стажер заблокировал бота.")
     await state.clear()
 
-@dp.callback_query(F.data.startswith("closeticket_"))
-async def close_ticket(call: CallbackQuery):
+@dp.callback_query(F.data.startswith("replyticket_"))
+async def reply_ticket_user(call: CallbackQuery, state: FSMContext):
     tid = call.data.split("_")[1]
+    await state.update_data(ticket_id=tid)
+    await call.message.edit_text("Введите ваше сообщение для администратора:")
+    await state.set_state(TicketEvent.waiting_for_reply)
+
+@dp.message(TicketEvent.waiting_for_reply)
+async def process_ticket_reply(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    tid = data['ticket_id']
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (tid,))
-        await db.commit()
-    await call.message.edit_text(f"Тикет #{tid} закрыт без ответа.")
+        async with db.execute("SELECT admin_id FROM tickets WHERE id = ?", (tid,)) as c:
+            row = await c.fetchone()
+            
+    if not row or not row[0]: return await message.answer("Ошибка поиска администратора.")
+    admin_id = row[0]
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="Ответить ✍️", callback_data=f"answerticket_{tid}_{message.from_user.id}")
+    b.button(text="Закрыть ❌", callback_data=f"closeticket_{tid}")
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    
+    try:
+        await bot.send_message(admin_id, f"💬 Сообщение от {username} (Тикет #{tid}):\n\n{message.text}", reply_markup=b.as_markup())
+        await message.answer("Отправлено!")
+    except Exception:
+        pass
+    await state.clear()
 
 
 # --- ПРОСМОТР ЗАПРОСОВ ДЛЯ АДМИНОВ ---
@@ -1025,12 +1055,58 @@ async def view_request_info(call: CallbackQuery):
     name_display = username if username else "Неизвестный (/update)"
     
     text = f"<b>Запрос на:</b> {t_name}\n<b>Дата и время:</b> {rdt}\n<b>Запросил:</b> 👤 <a href='tg://user?id={uid}'>{name_display}</a>"
-    b = InlineKeyboardBuilder()
+   b = InlineKeyboardBuilder()
+    b.button(text="Принять ✅", callback_data=f"acceptreq_{rid}_{uid}")
     b.button(text="Удалить запрос 🗑", callback_data=f"delreq_{rid}")
-    b.button(text="Назад к департаментам", callback_data="backreqs")
+    b.button(text="Назад", callback_data="backreqs")
     b.adjust(1)
     
     await call.message.edit_text(text, reply_markup=b.as_markup(), parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("acceptreq_"))
+async def accept_request(call: CallbackQuery, state: FSMContext):
+    _, rid, uid = call.data.split("_")
+    uid = int(uid)
+    admin_id = call.from_user.id
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT type, department FROM requests WHERE id = ?", (rid,)) as c:
+            req = await c.fetchone()
+        if not req: return await call.answer("Запрос уже обработан.", show_alert=True)
+        rtype, dept = req
+        await db.execute("DELETE FROM requests WHERE id = ?", (rid,))
+        
+        async with db.execute("SELECT value FROM settings WHERE key = 'interview_accept_msg'") as c:
+            int_msg_row = await c.fetchone()
+            interview_msg = int_msg_row[0] if int_msg_row else "Ваш запрос на собеседование принят! Напишите ваш ник в Discord:"
+        await db.commit()
+
+    user_key = StorageKey(bot_id=bot.id, chat_id=uid, user_id=uid)
+    await state.storage.set_state(user_key, RequestAccept.waiting_for_discord)
+    await state.storage.set_data(user_key, {'accept_admin_id': admin_id, 'req_dept': dept, 'req_type': rtype})
+    
+    msg_text = interview_msg if rtype == "interview" else "Ваш запрос на тренинг принят! Пожалуйста, напишите ваш ник в Discord:"
+    try:
+        await bot.send_message(uid, msg_text)
+        await call.message.edit_text("Запрос принят. Ожидаем дискорд стажера.")
+    except Exception:
+        await call.message.edit_text("Не удалось связаться со стажером.")
+
+@dp.message(RequestAccept.waiting_for_discord)
+async def process_discord_nick(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    admin_id = data.get('accept_admin_id')
+    rtype_rus = "Собеседование" if data.get('req_type') == "interview" else "Тренинг"
+    dept = data.get('req_dept')
+    username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+    
+    if admin_id:
+        try:
+            await bot.send_message(admin_id, f"✅ Стажер {username} прислал Discord для слота ({dept} | {rtype_rus}):\n\n<b>{message.text}</b>", parse_mode="HTML")
+        except Exception:
+            pass
+    await message.answer("Ваш Discord успешно отправлен проверяющему!")
+    await state.clear()
 
 @dp.callback_query(F.data.startswith("delreq_"))
 async def delete_request(call: CallbackQuery):
