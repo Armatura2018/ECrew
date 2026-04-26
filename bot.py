@@ -1014,6 +1014,18 @@ async def process_ticket_reply(message: types.Message, state: FSMContext):
         pass
     await state.clear()
 
+@dp.callback_query(F.data.startswith("closeticket_"))
+async def close_ticket(call: types.CallbackQuery, state: FSMContext):
+    tid = call.data.split("_")[1]
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE tickets SET status = 'closed' WHERE id = ?", (tid,))
+        await db.commit()
+        
+    await call.message.edit_text(f"✅ Тикет #{tid} успешно закрыт.")
+    await call.answer("Тикет закрыт!")
+    await state.clear()
+
 
 # --- ПРОСМОТР ЗАПРОСОВ ДЛЯ АДМИНОВ ---
 @dp.message(Command("requests"), F.chat.type == "private")
