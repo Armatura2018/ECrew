@@ -133,6 +133,8 @@ async def init_db():
 
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pass_msg', 'С радостью сообщаем, что Вы успешно прошли все три этапа отборочного процесса. Отдел Кадров высоко оценил Ваш уровень компетенций и опыт, которые в полной мере соответствуют нашим требованиям и ожиданиям. Мы были впечатлены Вашими результатами на каждом из этапов. Для дальнейших инструкций обратитесь @antoninaiivanovna')")
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('fail_msg', 'Информируем вас, что по результатам экзамена ваша кандидатура не была утверждена департаментом кадров. К сожалению, текущий результат не соответствует установленным требованиям для данной позиции. Вы можете повторно направить заявку на участие в следующем отборочном туре.')")
+        # Статус запросов: 1 - включены, 0 - выключены
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('requests_enabled', '1')")
         
         await db.commit()
 
@@ -365,6 +367,24 @@ async def cmd_trainees(message: types.Message):
         
     text = "\n".join(lines)
     await message.answer(text[:4096], parse_mode="HTML")
+
+@dp.message(Command("toggle_requests"), F.chat.type == "private")
+async def cmd_toggle_requests(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key = 'requests_enabled'") as c:
+            row = await c.fetchone()
+            
+        current_state = row[0] if row else '1'
+        new_state = '0' if current_state == '1' else '1'
+        
+        await db.execute("UPDATE settings SET value = ? WHERE key = 'requests_enabled'", (new_state,))
+        await db.commit()
+        
+    status_text = "✅ ВКЛЮЧЕНЫ" if new_state == '1' else "❌ ВЫКЛЮЧЕНЫ"
+    await message.answer(f"Запросы на тренинги и собеседования теперь {status_text}.")
+
 
 @dp.message(Command("update"), F.chat.type == "private")
 async def cmd_update(message: types.Message):
@@ -756,6 +776,14 @@ async def cmd_interview(message: types.Message):
 # --- ЗАПРОСЫ ОТ СТАЖЕРОВ ---
 @dp.message(Command("request"), F.chat.type == "private")
 async def cmd_request(message: types.Message, state: FSMContext):
+    # Сначала проверяем, включены ли запросы
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key = 'requests_enabled'") as c:
+            row = await c.fetchone()
+            if row and row[0] == '0':
+                return await message.answer(" В данный момент запросы на тренинги и собеседования временно недоступны. Пожалуйста, попробуйте позже.")
+
+    # Если включены, продолжаем стандартную логику
     data = await get_user_data(message.from_user.id)
     if not data or data[0] != 'trainee' or data[3] == 0: return
     
@@ -766,7 +794,8 @@ async def cmd_request(message: types.Message, state: FSMContext):
     await state.update_data(stage=stage)
     await message.answer("Выберите ваш департамент:", reply_markup=get_departments_kb("reqdept"))
     await state.set_state(RequestEvent.waiting_for_dept)
-    
+
+
 @dp.callback_query(F.data.startswith("reqdept_"), RequestEvent.waiting_for_dept)
 async def process_req_dept(call: CallbackQuery, state: FSMContext):
     dept_map = {"reqdept_pilots": "Пилоты", "reqdept_ground": "Наземные службы", "reqdept_cabin": "Бортпроводники"}
