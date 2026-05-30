@@ -800,7 +800,7 @@ async def cmd_request(message: types.Message, state: FSMContext):
 async def process_req_dept(call: CallbackQuery, state: FSMContext):
     dept_map = {"reqdept_pilots": "Пилоты", "reqdept_ground": "Наземные службы", "reqdept_cabin": "Бортпроводники"}
     await state.update_data(department=dept_map.get(call.data))
-    await call.message.edit_text("Укажите удобное вам время (10:00 - 20:00, время в MSK (GTM+3))"
+    await call.message.edit_text("Укажите удобное вам время (10:00 - 20:00, время в MSK (GTM+3)")
     await state.set_state(RequestEvent.waiting_for_datetime)
     
 @dp.message(RequestEvent.waiting_for_datetime)
