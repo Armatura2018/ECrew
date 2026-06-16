@@ -3,7 +3,8 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
-
+from aiogram import html
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -13,6 +14,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.fsm.storage.base import StorageKey
 import aiosqlite
+ITEMS_PER_PAGE = 7
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8622961253:AAEkR6VSv3WnLKjNJ19eJkPjmM9dfLz5jB8") # Вставь свой токен сюда
@@ -350,23 +352,107 @@ async def cmd_send_exam(message: types.Message):
 
 # === ПРОСМОТР СТАЖЕРОВ (ДЛЯ ВСЕХ АДМИНОВ) ===
 @dp.message(Command("trainees"), F.chat.type == "private")
-async def cmd_trainees(message: types.Message):
-    if not await is_admin(message.from_user.id): return
+async def send_trainees_page(event, page: int):
+    # Определяем, вызвано ли это через команду (Message) или через кнопку (CallbackQuery)
+    is_callback = isinstance(event, types.CallbackQuery)
+    message = event.message if is_callback else event
     
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id, department, stage, username FROM users WHERE role = 'trainee' AND is_active = 1") as c:
-            rows = await c.fetchall()
+        # 1. Считаем общее количество активных стажеров в реальном времени
+        async with db.execute("SELECT COUNT(*) FROM users WHERE role = 'trainee' AND is_active = 1") as c:
+            total_count = (await c.fetchone())[0]
             
-    if not rows:
-        return await message.answer("Активные стажеры отсутствуют.")
+    # Если стажеров вообще нет в базе
+    if total_count == 0:
+        text = "📋 Список стажеров пуст."
+        if is_callback:
+            await event.message.edit_text(text, reply_markup=None)
+            await event.answer()
+        else:
+            await message.answer(text)
+        return
+
+    # 2. Высчитываем общее количество страниц
+    total_pages = math.ceil(total_count / ITEMS_PER_PAGE)
+    
+    # Защита от выхода за границы (например, если стажеров удалили, пока админ листал)
+    if page < 1: page = 1
+    if page > total_pages: page = total_pages
+
+    # Высчитываем сдвиг для SQL-запроса
+    offset = (page - 1) * ITEMS_PER_PAGE
+
+    # 3. Достаем из базы только нужную "порцию" стажеров для текущей страницы
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id, username, first_name, department, stage FROM users WHERE role = 'trainee' AND is_active = 1 LIMIT ? OFFSET ?",
+            (ITEMS_PER_PAGE, offset)
+        ) as c:
+            trainees = await c.fetchall()
+
+    # Сводка в заголовке
+    text = f"📋 <b>Активные стажеры (Всего: {total_count}):</b>\n\n"
+    
+    for uid, username, first_name, dept, stage in trainees:
+        display_name = username if username else first_name
+        safe_name = html.quote(display_name)
+        text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>)\nДепартамент: {dept} | Этап: {stage}\n\n"
+
+    # 4. Создаем кнопки навигации
+    kb = InlineKeyboardBuilder()
+    
+    # Кнопка "Назад" (влево)
+    if page > 1:
+        kb.button(text="⬅️ Назад", callback_data=f"traineespage_{page-1}")
+    else:
+        kb.button(text="⏹️", callback_data="ignore_click")
         
-    lines = ["<b>Список стажеров:</b>\n"]
-    for uid, dept, stage, username in rows:
-        display_name = username if username else "Имя не загружено (/update)"
-        lines.append(f"👤 <a href='tg://user?id={uid}'>{display_name}</a> ({uid})\nДепартамент: {dept} | Этап: {stage}\n")
+    # Центральная кнопка с индикатором страниц (просто текст, клик ничего не делает)
+    kb.button(text=f"Стр. {page}/{total_pages}", callback_data="ignore_click")
+    
+    # Кнопка "Вперед" (вправо)
+    if page < total_pages:
+        kb.button(text="Вперед ➡️", callback_data=f"traineespage_{page+1}")
+    else:
+        kb.button(text="⏹️", callback_data="ignore_click")
         
-    text = "\n".join(lines)
-    await message.answer(text[:4096], parse_mode="HTML")
+    kb.adjust(3) # Выстраиваем кнопки строго в один ряд из 3 штук
+
+    # 5. Отправляем пользователю
+    if is_callback:
+        try:
+            # Обновляем старое сообщение, чтобы интерфейс не прыгал
+            await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+        except Exception:
+            # На случай, если админ нажал на кнопку страницы, на которой уже находится
+            pass
+        await event.answer()
+    else:
+        # Если ввели команду текстом, шлем новое сообщение
+        await message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
+
+
+# --- ОБРАБОТЧИКИ КОМАНДЫ И КНОПОК ---
+
+# Сама команда /trainees (всегда открывает первую страницу)
+@dp.message(Command("trainees"), F.chat.type == "private")
+async def cmd_trainees(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    await send_trainees_page(message, page=1)
+    # Обработка нажатий на стрелочки
+@dp.callback_query(F.data.startswith("traineespage_"))
+async def process_trainees_page(call: types.CallbackQuery):
+    if not await is_admin(call.from_user.id): 
+        return await call.answer("У вас нет прав.", show_alert=True)
+    
+    # Достаем номер страницы из callback_data
+    page = int(call.data.split("_")[1])
+    await send_trainees_page(call, page)
+
+# Заглушка для некликабельных кнопок (индикатор и пустые стрелки)
+@dp.callback_query(F.data == "ignore_click")
+async def process_ignore_click(call: types.CallbackQuery):
+    await call.answer()
 
 @dp.message(Command("toggle_requests"), F.chat.type == "private")
 async def cmd_toggle_requests(message: types.Message):
