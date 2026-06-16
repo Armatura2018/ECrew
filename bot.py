@@ -351,7 +351,6 @@ async def cmd_send_exam(message: types.Message):
     await message.answer(f"Рассылка завершена. Доставлено стажерам: {count}.")
 
 # === ПРОСМОТР СТАЖЕРОВ (ДЛЯ ВСЕХ АДМИНОВ) ===
-@dp.message(Command("trainees"), F.chat.type == "private")
 async def send_trainees_page(event, page: int):
     # Определяем, вызвано ли это через команду (Message) или через кнопку (CallbackQuery)
     is_callback = isinstance(event, types.CallbackQuery)
