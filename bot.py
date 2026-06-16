@@ -353,16 +353,13 @@ async def cmd_send_exam(message: types.Message):
 
 # === ПРОСМОТР СТАЖЕРОВ (ДЛЯ ВСЕХ АДМИНОВ) ===
 async def send_trainees_page(event, page: int):
-    # Определяем, вызвано ли это через команду (Message) или через кнопку (CallbackQuery)
     is_callback = isinstance(event, types.CallbackQuery)
     message = event.message if is_callback else event
     
     async with aiosqlite.connect(DB_PATH) as db:
-        # 1. Считаем общее количество активных стажеров в реальном времени
         async with db.execute("SELECT COUNT(*) FROM users WHERE role = 'trainee' AND is_active = 1") as c:
             total_count = (await c.fetchone())[0]
             
-    # Если стажеров вообще нет в базе
     if total_count == 0:
         text = "📋 Список стажеров пуст."
         if is_callback:
@@ -372,63 +369,53 @@ async def send_trainees_page(event, page: int):
             await message.answer(text)
         return
 
-    # 2. Высчитываем общее количество страниц
     total_pages = math.ceil(total_count / ITEMS_PER_PAGE)
     
-    # Защита от выхода за границы (например, если стажеров удалили, пока админ листал)
     if page < 1: page = 1
     if page > total_pages: page = total_pages
 
-    # Высчитываем сдвиг для SQL-запроса
     offset = (page - 1) * ITEMS_PER_PAGE
 
-    # 3. Достаем из базы только нужную "порцию" стажеров для текущей страницы
+    # УБРАЛИ first_name из запроса, чтобы база не выдавала ошибку
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT user_id, username, first_name, department, stage FROM users WHERE role = 'trainee' AND is_active = 1 LIMIT ? OFFSET ?",
+            "SELECT user_id, username, department, stage FROM users WHERE role = 'trainee' AND is_active = 1 LIMIT ? OFFSET ?",
             (ITEMS_PER_PAGE, offset)
         ) as c:
             trainees = await c.fetchall()
 
-    # Сводка в заголовке
     text = f"📋 <b>Активные стажеры (Всего: {total_count}):</b>\n\n"
     
-    for uid, username, first_name, dept, stage in trainees:
-        display_name = username if username else first_name
+    # Теперь перебираем 4 параметра вместо 5
+    for uid, username, dept, stage in trainees:
+        # Если никнейма нет (бывает у некоторых юзеров), пишем просто "Стажер"
+        display_name = f"@{username}" if username else f"Стажер {uid}"
         safe_name = html.quote(display_name)
         text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>)\nДепартамент: {dept} | Этап: {stage}\n\n"
 
-    # 4. Создаем кнопки навигации
     kb = InlineKeyboardBuilder()
     
-    # Кнопка "Назад" (влево)
     if page > 1:
         kb.button(text="⬅️ Назад", callback_data=f"traineespage_{page-1}")
     else:
         kb.button(text="⏹️", callback_data="ignore_click")
         
-    # Центральная кнопка с индикатором страниц (просто текст, клик ничего не делает)
     kb.button(text=f"Стр. {page}/{total_pages}", callback_data="ignore_click")
     
-    # Кнопка "Вперед" (вправо)
     if page < total_pages:
         kb.button(text="Вперед ➡️", callback_data=f"traineespage_{page+1}")
     else:
         kb.button(text="⏹️", callback_data="ignore_click")
         
-    kb.adjust(3) # Выстраиваем кнопки строго в один ряд из 3 штук
+    kb.adjust(3)
 
-    # 5. Отправляем пользователю
     if is_callback:
         try:
-            # Обновляем старое сообщение, чтобы интерфейс не прыгал
             await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
         except Exception:
-            # На случай, если админ нажал на кнопку страницы, на которой уже находится
             pass
         await event.answer()
     else:
-        # Если ввели команду текстом, шлем новое сообщение
         await message.answer(text, parse_mode="HTML", reply_markup=kb.as_markup())
 
 
