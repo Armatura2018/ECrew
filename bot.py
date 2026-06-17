@@ -462,24 +462,27 @@ async def cmd_toggle_requests(message: types.Message):
 @dp.message(Command("update"), F.chat.type == "private")
 async def cmd_update(message: types.Message):
     if not await is_admin(message.from_user.id): return
-    await message.answer("Начинаю обновление никнеймов стажеров. Это может занять несколько секунд...")
+    
+    await message.answer("Начинаю обновление никнеймов всех пользователей (стажеров и администрации). Это может занять несколько секунд...")
     
     updated = 0
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM users WHERE role = 'trainee' AND is_active = 1") as c:
+        # Выбираем всех активных пользователей, независимо от их роли
+        async with db.execute("SELECT user_id FROM users WHERE is_active = 1") as c:
             users = await c.fetchall()
             
         for (uid,) in users:
             try:
                 chat = await bot.get_chat(uid)
-                name = f"@{chat.username}" if chat.username else chat.first_name
+                # Сохраняем чистый username (без @), чтобы избежать двойных @@ в списках
+                name = chat.username if chat.username else chat.first_name
                 await db.execute("UPDATE users SET username = ? WHERE user_id = ?", (name, uid))
                 updated += 1
             except Exception:
-                pass # Если пользователь заблокировал бота, пропускаем
+                pass 
         await db.commit()
         
-    await message.answer(f"Обновление завершено! Обновлено профилей: {updated}.")
+    await message.answer(f"Обновление завершено!\nВсего обновлено профилей: {updated}.")
 
 
 @dp.message(CommandStart(), F.chat.type == "private")
