@@ -823,10 +823,9 @@ async def process_start_event(call: CallbackQuery):
 
     # Скрипт текста для стажеров со ссылкой на дискорд
     discord_msg = (
-        f"🔔 <b>Важное уведомление!</b>\n\n"
         f"Ваше <b>{etype}</b> начинается прямо сейчас.\n"
-        f"Для подключения пройдите по ссылке на наш Discord-сервер и ожидайте принятия в канале.\n\n"
-        f"🔗 <b>Ссылка:</b> https://discord.gg/e459Y7GrNX"
+        f"Для подключения пройдите по ссылке на наш Discord-сервер.\n\n"
+        f"🔗 <b>Ссылка:</b> https://discord.gg/ScfYXpnd5p"
     )
 
     sent_count = 0
