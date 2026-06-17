@@ -773,6 +773,107 @@ async def process_cancel_booking(call: CallbackQuery):
         
     await call.message.edit_text("Вы успешно отменили свою запись на это мероприятие.")
 
+@dp.message(Command("start_event"), F.chat.type == "private")
+async def cmd_start_event(message: types.Message):
+    if not await is_admin(message.from_user.id): return
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, type, date, time FROM events") as c:
+            events = await c.fetchall()
+            
+    if not events:
+        return await message.answer("В базе нет активных мероприятий.")
+
+    b = InlineKeyboardBuilder()
+    for eid, etype, edate, etime in events:
+        name = "Интервью" if etype == "interview" else "Тренинг"
+        b.button(text=f"{name} | {edate} {etime}", callback_data=f"startevent_{eid}")
+    b.adjust(1)
+    await message.answer("Выберите мероприятие для начала:", reply_markup=b.as_markup())
+
+@dp.callback_query(F.data.startswith("startevent_"))
+async def process_start_event(call: CallbackQuery):
+    eid = int(call.data.split("_")[1])
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Узнаем тип слота
+        async with db.execute("SELECT type FROM events WHERE id = ?", (eid,)) as c:
+            ev = await c.fetchone()
+        if not ev:
+            return await call.answer("Мероприятие уже начато или удалено.", show_alert=True)
+            
+        etype = "Интервью" if ev[0] == "interview" else "Тренинг"
+
+        # Достаем всех записавшихся (используем только user_id и username, так как first_name в БД нет)
+        async with db.execute("""
+            SELECT u.user_id, u.username, u.department
+            FROM bookings b
+            JOIN users u ON b.user_id = u.user_id
+            WHERE b.event_id = ?
+        """, (eid,)) as c:
+            enrolled = await c.fetchall()
+
+        # Удаляем мероприятие и записи на него
+        await db.execute("DELETE FROM events WHERE id = ?", (eid,))
+        await db.execute("DELETE FROM bookings WHERE event_id = ?", (eid,))
+        await db.commit()
+
+    # Скрипт текста для стажеров со ссылкой на дискорд
+    discord_msg = (
+        f"🔔 <b>Важное уведомление!</b>\n\n"
+        f"Ваше <b>{etype}</b> начинается прямо сейчас.\n"
+        f"Для подключения пройдите по ссылке на наш Discord-сервер и ожидайте принятия в канале.\n\n"
+        f"🔗 <b>Ссылка:</b> https://discord.gg/e459Y7GrNX"
+    )
+
+    sent_count = 0
+    for trainee in enrolled:
+        uid = trainee[0]
+        try:
+            await bot.send_message(uid, discord_msg, parse_mode="HTML")
+            sent_count += 1
+        except Exception:
+            pass
+
+    if not enrolled:
+        return await call.message.edit_text("✅ Мероприятие закрыто. На него никто не записался.")
+
+    # Выводим админу кликабельный список
+    text = f"✅ <b>Мероприятие начато!</b> Уведомления со ссылкой отправлены ({sent_count} из {len(enrolled)}).\n\n<b>Список участников:</b>\n"
+    
+    for uid, username, dept in enrolled:
+        display_name = f"@{username}" if username else f"Стажер {uid}"
+        safe_name = html.quote(display_name)
+        text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>) — {dept}\n"
+
+    await call.message.edit_text(text, parse_mode="HTML")
+
+@dp.message(Command("admins"), F.chat.type == "private")
+async def cmd_admins(message: types.Message):
+    if not await is_head_admin(message.from_user.id): return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id, username, role FROM users WHERE role IN ('admin', 'head_admin') AND is_active = 1") as c:
+            admins = await c.fetchall()
+
+    if not admins:
+        return await message.answer("Администраторов пока нет.")
+
+    text = "📋 <b>Список администрации:</b>\n\n"
+    for uid, username, role in admins:
+        display_name = f"@{username}" if username else f"Админ {uid}"
+        safe_name = html.quote(display_name)
+        role_name = "Главный админ" if role == 'head_admin' else "Администратор"
+        
+        text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>)\nРоль: {role_name}\n\n"
+
+    # Защита от превышения лимита символов
+    if len(text) > 4000:
+        for x in range(0, len(text), 4000):
+            await message.answer(text[x:x+4000], parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
+
 @dp.message(Command("my_events"), F.chat.type == "private")
 async def cmd_my_events(message: types.Message):
     if not await is_admin(message.from_user.id): return
