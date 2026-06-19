@@ -99,7 +99,7 @@ async def init_db():
             value TEXT
         )""")
         # Установим стандартное сообщение, если его еще нет
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_template', 'Появился новый слот!\nДепартамент: {dept}\nТип: {type}')")
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_template', 'Появился новый слот!\nДепартамент: {dept}\nТип: {type}\nИспользуйте /interview для записи')")
         
         await db.execute("""CREATE TABLE IF NOT EXISTS bookings (
             event_id INTEGER,
