@@ -1182,6 +1182,19 @@ async def process_notify_dept(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("Выберите тип слота:", reply_markup=kb.as_markup())
     await state.set_state(NotifyEvent.waiting_for_type)
 
+@dp.callback_query(F.data.startswith("notifydept_"), NotifyEvent.waiting_for_dept)
+async def process_notify_dept(call: CallbackQuery, state: FSMContext):
+    dept_map = {"notifydept_pilots": "Пилоты", "notifydept_ground": "Наземные службы", "notifydept_cabin": "Бортпроводники"}
+    await state.update_data(dept=dept_map.get(call.data))
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Тренинг", callback_data="notifytype_training")
+    kb.button(text="Собеседование", callback_data="notifytype_interview")
+    kb.adjust(2)
+    
+    await call.message.edit_text("Выберите тип слота:", reply_markup=kb.as_markup())
+    await state.set_state(NotifyEvent.waiting_for_type)
+
 @dp.callback_query(F.data.startswith("notifytype_"), NotifyEvent.waiting_for_type)
 async def process_notify_finish(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
