@@ -961,31 +961,36 @@ async def cmd_my_events(message: types.Message):
         b.adjust(1)
         await message.answer(f"Слот: {name} | {edate} в {etime}", reply_markup=b.as_markup())
 
-@dp.callback_query(F.data.startswith("viewevent_"))
-async def process_view_event(call: CallbackQuery):
-    eid = int(call.data.split("_")[1])
+# Пример вашей функции, которая обрабатывает нажатие кнопки "Посмотреть записавшихся"
+@dp.callback_query(F.data.startswith("view_event_")) # Название вашего фильтра может отличаться
+async def view_event_participants(call: types.CallbackQuery):
+    # Здесь вы получаете event_id из коллбэка
+    event_id = int(call.data.split("_")[2]) 
     
-    # Извлекаем пользователей из базы (нужны user_id, username и department)
-async with aiosqlite.connect(DB_PATH) as db:
-    async with db.execute("""
-        SELECT u.user_id, u.username, u.department
-        FROM bookings b
-        JOIN users u ON b.user_id = u.user_id
-        WHERE b.event_id = ?
-    """, (eid,)) as c:  # Замените event_id на вашу переменную
-        enrolled = await c.fetchall()
+    # --- НАЧАЛО ВСТАВЛЕННОГО БЛОКА ---
+    # Обратите внимание: всё это сдвинуто вправо (4 пробела), 
+    # чтобы находиться ВНУТРИ функции async def
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("""
+            SELECT u.user_id, u.username, u.department
+            FROM bookings b
+            JOIN users u ON b.user_id = u.user_id
+            WHERE b.event_id = ?
+        """, (event_id,)) as c:
+            enrolled = await c.fetchall()
 
-if not enrolled:
-    text = "На это мероприятие пока никто не записался."
-else:
-    text = "📋 <b>Список записавшихся:</b>\n\n"
-    for uid, username, dept in enrolled:
-        # Если username сохранен чисто (без @), подставляем @. Иначе пишем ID.
-        display_name = f"@{username}" if username and not username.startswith("@") else username if username else f"Стажер {uid}"
-        safe_name = html.quote(display_name)
-        text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>) — {dept}\n"
+    if not enrolled:
+        text = "На это мероприятие пока никто не записался."
+    else:
+        text = "📋 <b>Список записавшихся:</b>\n\n"
+        for uid, username, dept in enrolled:
+            display_name = f"@{username}" if username and not username.startswith("@") else username if username else f"Стажер {uid}"
+            safe_name = html.quote(display_name)
+            text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>) — {dept}\n"
+    # --- КОНЕЦ ВСТАВЛЕННОГО БЛОКА ---
 
-# Дальше отправляете или редактируете сообщение с этим text
+    # И затем отправляете этот текст:
+    await call.message.edit_text(text, parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("delevent_"))
 async def process_delete_event(call: CallbackQuery):
