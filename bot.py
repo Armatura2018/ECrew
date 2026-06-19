@@ -45,13 +45,18 @@ class CreateEvent(StatesGroup):
     waiting_for_description = State()
     confirming = State()
 
+class CreatorBroadcast(StatesGroup):
+    waiting_for_stage = State()
+    waiting_for_dept = State()
+    waiting_for_text = State()
+
 class RequestEvent(StatesGroup):
     waiting_for_dept = State()
     waiting_for_datetime = State()
 
 class NotifyEvent(StatesGroup):
+    waiting_for_stage = State()
     waiting_for_dept = State()
-    waiting_for_type = State()
 
 class EditNotify(StatesGroup):
     waiting_for_text = State()
@@ -211,6 +216,66 @@ async def cmd_add_head(message: types.Message):
         await db.execute("INSERT OR REPLACE INTO users (user_id, role, is_active) VALUES (?, 'head_admin', 1)", (uid,))
         await db.commit()
     await message.answer("Пользователь назначен главным администратором.")
+
+@dp.message(Command("mass_send"), F.chat.type == "private")
+async def cmd_mass_send(message: types.Message, state: FSMContext):
+    if not await is_creator(message.from_user.id): return
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="Интервью", callback_data="cb_stage_Интервью")
+    b.button(text="Тренинг", callback_data="cb_stage_Тренинг")
+    b.button(text="Экзамен", callback_data="cb_stage_Экзамен")
+    b.adjust(1)
+    
+    await message.answer("Выберите этап стажеров для рассылки:", reply_markup=b.as_markup())
+    await state.set_state(CreatorBroadcast.waiting_for_stage)
+
+@dp.callback_query(F.data.startswith("cb_stage_"), CreatorBroadcast.waiting_for_stage)
+async def cb_stage_select(call: types.CallbackQuery, state: FSMContext):
+    stage = call.data.split("_")[2]
+    await state.update_data(stage=stage)
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="Пилоты", callback_data="cb_dept_Пилоты")
+    b.button(text="Наземные службы", callback_data="cb_dept_Наземные службы")
+    b.button(text="Бортпроводники", callback_data="cb_dept_Бортпроводники")
+    b.button(text="Все департаменты", callback_data="cb_dept_All")
+    b.adjust(1)
+    
+    await call.message.edit_text(f"Этап: {stage}.\nТеперь выберите департамент:", reply_markup=b.as_markup())
+    await state.set_state(CreatorBroadcast.waiting_for_dept)
+
+@dp.callback_query(F.data.startswith("cb_dept_"), CreatorBroadcast.waiting_for_dept)
+async def cb_dept_select(call: types.CallbackQuery, state: FSMContext):
+    dept = call.data.split("_")[2]
+    await state.update_data(dept=dept)
+    await call.message.edit_text("Отправьте текст сообщения для рассылки:")
+    await state.set_state(CreatorBroadcast.waiting_for_text)
+
+@dp.message(CreatorBroadcast.waiting_for_text)
+async def cb_text_receive(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    stage = data['stage']
+    dept = data['dept']
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        if dept == "All":
+            async with db.execute("SELECT user_id FROM users WHERE stage = ? AND is_active = 1 AND role = 'trainee'", (stage,)) as c:
+                users = await c.fetchall()
+        else:
+            async with db.execute("SELECT user_id FROM users WHERE stage = ? AND department = ? AND is_active = 1 AND role = 'trainee'", (stage, dept)) as c:
+                users = await c.fetchall()
+    
+    count = 0
+    for (uid,) in users:
+        try:
+            await bot.send_message(uid, message.html_text, parse_mode="HTML")
+            count += 1
+        except Exception:
+            pass
+            
+    await message.answer(f"✅ Рассылка завершена!\nПолучили сообщение: {count} стажеров.")
+    await state.clear()
 
 @dp.message(Command("add_admin"), F.chat.type == "private")
 async def cmd_add_admin(message: types.Message):
@@ -900,16 +965,27 @@ async def cmd_my_events(message: types.Message):
 async def process_view_event(call: CallbackQuery):
     eid = int(call.data.split("_")[1])
     
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM bookings WHERE event_id = ?", (eid,)) as c:
-            users = await c.fetchall()
-            
-    if not users:
-        return await call.answer("Пока никто не записался.", show_alert=True)
-        
-    text = "Список записавшихся (ID):\n" + "\n".join([str(u[0]) for u in users])
-    await call.message.answer(text)
-    await call.answer()
+    # Извлекаем пользователей из базы (нужны user_id, username и department)
+async with aiosqlite.connect(DB_PATH) as db:
+    async with db.execute("""
+        SELECT u.user_id, u.username, u.department
+        FROM bookings b
+        JOIN users u ON b.user_id = u.user_id
+        WHERE b.event_id = ?
+    """, (eid,)) as c:  # Замените event_id на вашу переменную
+        enrolled = await c.fetchall()
+
+if not enrolled:
+    text = "На это мероприятие пока никто не записался."
+else:
+    text = "📋 <b>Список записавшихся:</b>\n\n"
+    for uid, username, dept in enrolled:
+        # Если username сохранен чисто (без @), подставляем @. Иначе пишем ID.
+        display_name = f"@{username}" if username and not username.startswith("@") else username if username else f"Стажер {uid}"
+        safe_name = html.quote(display_name)
+        text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>) — {dept}\n"
+
+# Дальше отправляете или редактируете сообщение с этим text
 
 @dp.callback_query(F.data.startswith("delevent_"))
 async def process_delete_event(call: CallbackQuery):
@@ -1025,8 +1101,68 @@ async def process_edit_notify_text(message: types.Message, state: FSMContext):
 @dp.message(Command("notify"), F.chat.type == "private")
 async def cmd_notify(message: types.Message, state: FSMContext):
     if not await is_admin(message.from_user.id): return
-    await message.answer("Для какого департамента новый слот?", reply_markup=get_departments_kb("notifydept"))
-    await state.set_state(NotifyEvent.waiting_for_dept)
+    
+    b = InlineKeyboardBuilder()
+    b.button(text="Интервью", callback_data="notify_stage_Интервью")
+    b.button(text="Тренинг", callback_data="notify_stage_Тренинг")
+    b.button(text="Экзамен", callback_data="notify_stage_Экзамен") 
+    b.adjust(1)
+    
+    await message.answer("Выберите этап для оповещения о новом слоте:", reply_markup=b.as_markup())
+    await state.set_state(NotifyEvent.waiting_for_stage)
+
+@dp.callback_query(F.data.startswith("notify_stage_"), NotifyEvent.waiting_for_stage)
+async def process_notify_stage(call: types.CallbackQuery, state: FSMContext):
+    stage = call.data.split("_")[2]
+    await state.update_data(stage=stage)
+    
+    if stage == "Интервью":
+        # Для интервью департамент пропускаем, сразу переходим к рассылке
+        await process_final_notify(call, state, stage=stage, dept="Все (Интервью)")
+    else:
+        # Для остальных этапов просим выбрать департамент
+        await call.message.edit_text(
+            f"Выбран этап: {stage}.\nУкажите департамент:", 
+            reply_markup=get_departments_kb("notify_dept")
+        )
+        await state.set_state(NotifyEvent.waiting_for_dept)
+
+@dp.callback_query(F.data.startswith("notify_dept_"), NotifyEvent.waiting_for_dept)
+async def process_notify_dept(call: types.CallbackQuery, state: FSMContext):
+    dept_map = {"notify_dept_pilots": "Пилоты", "notify_dept_ground": "Наземные службы", "notify_dept_cabin": "Бортпроводники"}
+    dept = dept_map.get(call.data)
+    
+    data = await state.get_data()
+    await process_final_notify(call, state, stage=data['stage'], dept=dept)
+
+# Вспомогательная функция для финальной отправки
+async def process_final_notify(call: types.CallbackQuery, state: FSMContext, stage: str, dept: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM settings WHERE key = 'notify_template'") as c:
+            template_row = await c.fetchone()
+        
+        template = template_row[0] if template_row else "Появился новый слот!\nДепартамент: {dept}\nТип: {type}"
+        msg_text = template.replace("{dept}", dept).replace("{type}", stage)
+        
+        if stage == "Интервью":
+            # Ищем всех активных стажеров, у которых сейчас этап "Интервью"
+            async with db.execute("SELECT user_id FROM users WHERE stage = 'Интервью' AND is_active = 1 AND role = 'trainee'") as c:
+                users = await c.fetchall()
+        else:
+            # Ищем стажеров по конкретному этапу и департаменту
+            async with db.execute("SELECT user_id FROM users WHERE stage = ? AND department = ? AND is_active = 1 AND role = 'trainee'", (stage, dept)) as c:
+                users = await c.fetchall()
+
+    count = 0
+    for (uid,) in users:
+        try:
+            await bot.send_message(uid, msg_text)
+            count += 1
+        except Exception:
+            pass
+            
+    await call.message.edit_text(f"✅ Уведомление разослано!\n\nЭтап: {stage}\nДепартамент: {dept}\nДоставлено стажерам: {count}.")
+    await state.clear()
 
 @dp.callback_query(F.data.startswith("notifydept_"), NotifyEvent.waiting_for_dept)
 async def process_notify_dept(call: CallbackQuery, state: FSMContext):
