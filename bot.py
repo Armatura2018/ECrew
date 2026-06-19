@@ -1182,60 +1182,6 @@ async def process_notify_dept(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("Выберите тип слота:", reply_markup=kb.as_markup())
     await state.set_state(NotifyEvent.waiting_for_type)
 
-@dp.callback_query(F.data.startswith("notifydept_"), NotifyEvent.waiting_for_dept)
-async def process_notify_dept(call: CallbackQuery, state: FSMContext):
-    dept_map = {"notifydept_pilots": "Пилоты", "notifydept_ground": "Наземные службы", "notifydept_cabin": "Бортпроводники"}
-    await state.update_data(dept=dept_map.get(call.data))
-    
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Тренинг", callback_data="notifytype_training")
-    kb.button(text="Собеседование", callback_data="notifytype_interview")
-    kb.adjust(2)
-    
-    await call.message.edit_text("Выберите тип слота:", reply_markup=kb.as_markup())
-    await state.set_state(NotifyEvent.waiting_for_type)
-
-@dp.callback_query(F.data.startswith("notifytype_"), NotifyEvent.waiting_for_type)
-async def process_notify_finish(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    dept_name = data['dept']
-    # Сопоставляем тип для поиска по этапу в базе
-    if call.data == "notifytype_training":
-        type_name = "Тренинг"
-        stage_search = "Тренинг"
-    else:
-        type_name = "Собеседование"
-        stage_search = "Интервью"
-    
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key = 'notify_template'") as c:
-            template = await c.fetchone()
-        
-        # Берем только стажеров конкретного департамента на конкретном этапе
-        async with db.execute(
-            "SELECT user_id FROM users WHERE role = 'trainee' AND is_active = 1 AND department = ? AND stage = ?", 
-            (dept_name, stage_search)
-        ) as c:
-            trainees = await c.fetchall()
-            
-    if not template:
-        return await call.message.edit_text("Ошибка: шаблон не найден.")
-            
-    final_text = template[0].format(dept=dept_name, type=type_name)
-    await call.message.edit_text(f"Рассылка для {dept_name} ({type_name})...")
-    
-    count = 0
-    for (uid,) in trainees:
-        try:
-            await bot.send_message(uid, final_text)
-            count += 1
-        except Exception:
-            pass
-            
-    await call.message.answer(f"Готово! Уведомлено {count} чел. из департамента {dept_name}.")
-    await state.clear()
-
-
 # --- ИТОГИ ЭКЗАМЕНА ---
 @dp.message(Command("exam"), F.chat.type == "private")
 async def cmd_exam(message: types.Message, state: FSMContext):
