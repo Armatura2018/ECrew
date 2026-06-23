@@ -87,9 +87,10 @@ async def init_db():
     db_file.parent.mkdir(parents=True, exist_ok=True)
     
     async with aiosqlite.connect(DB_PATH) as db:
-        # Роли: 'head_admin', 'admin', 'trainee'
+        # 1. ДОБАВИЛИ username TEXT в структуру новой таблицы
         await db.execute("""CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
+            username TEXT,
             role TEXT,
             department TEXT,
             stage TEXT,
@@ -112,7 +113,7 @@ async def init_db():
             key TEXT PRIMARY KEY,
             value TEXT
         )""")
-        # Установим стандартное сообщение, если его еще нет
+        
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_template', 'Появился новый слот!\nДепартамент: {dept}\nТип: {type}')")
         
         await db.execute("""CREATE TABLE IF NOT EXISTS bookings (
@@ -121,15 +122,20 @@ async def init_db():
             PRIMARY KEY(event_id, user_id)
         )""")
         
-        await db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-        
         # Добавляем базовый текст экзамена, если его нет
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('exam_text', 'Ссылка на экзамен пока не задана.')")
-        # Пытаемся добавить колонку username, если её еще нет
+        
+        # 2. ИСПРАВИЛИ МИГРАЦИЮ: Теперь колонка точно добавится в старую БД при перезапуске
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        except Exception:
+            pass
+
         try:
             await db.execute("ALTER TABLE tickets ADD COLUMN admin_id INTEGER")
         except Exception:
             pass
+            
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('interview_accept_msg', 'Ваш запрос на собеседование принят! Присоединитесь к нашему стаф-порталу (https://discord.gg/e459Y7GrNX) и напишите ваш ник в Discord для связи:')")
             
         # Таблица для запросов
@@ -150,7 +156,6 @@ async def init_db():
 
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pass_msg', 'С радостью сообщаем, что Вы успешно прошли все три этапа отборочного процесса. Отдел Кадров высоко оценил Ваш уровень компетенций и опыт, которые в полной мере соответствуют нашим требованиям и ожиданиям. Мы были впечатлены Вашими результатами на каждом из этапов. Для дальнейших инструкций обратитесь @antoninaiivanovna')")
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('fail_msg', 'Информируем вас, что по результатам экзамена ваша кандидатура не была утверждена департаментом кадров. К сожалению, текущий результат не соответствует установленным требованиям для данной позиции. Вы можете повторно направить заявку на участие в следующем отборочном туре.')")
-        # Статус запросов: 1 - включены, 0 - выключены
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('requests_enabled', '1')")
         
         await db.commit()
