@@ -18,9 +18,17 @@ import aiosqlite
 ITEMS_PER_PAGE = 7
 
 # === НАСТРОЙКИ ===
-# Данные берутся строго из переменных окружения на хостинге для вашей безопасности
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CREATOR_ID_ENV = os.getenv("CREATOR_ID")
+
+if not BOT_TOKEN:
+    raise ValueError("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения BOT_TOKEN не задана на хостинге!")
+if not CREATOR_ID_ENV:
+    raise ValueError("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения CREATOR_ID не задана на хостинге!")
+
+# Вот эта строчка ОБЯЗАТЕЛЬНО должна быть вверху файла без отступов:
+CREATOR_ID = int(CREATOR_ID_ENV)
+
 DB_PATH = os.getenv("DATABASE_PATH", "data/airline_bot.db")
 
 bot = Bot(token=BOT_TOKEN)
