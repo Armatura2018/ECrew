@@ -18,8 +18,9 @@ import aiosqlite
 ITEMS_PER_PAGE = 7
 
 # === НАСТРОЙКИ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8622961253:AAEkR6VSv3WnLKjNJ19eJkPjmM9dfLz5jB8") # Вставь свой токен сюда
-CREATOR_ID = 7616343249 # Вставь свой ID сюда
+# Данные берутся строго из переменных окружения на хостинге для вашей безопасности
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CREATOR_ID_ENV = os.getenv("CREATOR_ID")
 DB_PATH = os.getenv("DATABASE_PATH", "data/airline_bot.db")
 
 bot = Bot(token=BOT_TOKEN)
@@ -1149,12 +1150,17 @@ async def process_final_notify(call: types.CallbackQuery, state: FSMContext, sta
         template = template_row[0] if template_row else "Появился новый слот!\nДепартамент: {dept}\nТип: {type}"
         msg_text = template.replace("{dept}", dept).replace("{type}", stage)
         
+        # === ДОБАВЛЕННЫЙ КУСОК: Автоматические подсказки для команд ===
         if stage == "Интервью":
-            # Ищем всех активных стажеров, у которых сейчас этап "Интервью"
+            msg_text += "\n\nДля записи напишите /interview"
+        elif stage == "Тренинг":
+            msg_text += "\n\nДля записи напишите /training"
+        # =============================================================
+        
+        if stage == "Интервью":
             async with db.execute("SELECT user_id FROM users WHERE stage = 'Интервью' AND is_active = 1 AND role = 'trainee'") as c:
                 users = await c.fetchall()
         else:
-            # Ищем стажеров по конкретному этапу и департаменту
             async with db.execute("SELECT user_id FROM users WHERE stage = ? AND department = ? AND is_active = 1 AND role = 'trainee'", (stage, dept)) as c:
                 users = await c.fetchall()
 
@@ -1168,7 +1174,7 @@ async def process_final_notify(call: types.CallbackQuery, state: FSMContext, sta
             
     await call.message.edit_text(f"✅ Уведомление разослано!\n\nЭтап: {stage}\nДепартамент: {dept}\nДоставлено стажерам: {count}.")
     await state.clear()
-
+    
 @dp.callback_query(F.data.startswith("notifydept_"), NotifyEvent.waiting_for_dept)
 async def process_notify_dept(call: CallbackQuery, state: FSMContext):
     dept_map = {"notifydept_pilots": "Пилоты", "notifydept_ground": "Наземные службы", "notifydept_cabin": "Бортпроводники"}
