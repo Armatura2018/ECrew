@@ -48,6 +48,7 @@ class ExamMessage(StatesGroup):
 class CreateEvent(StatesGroup):
     choosing_type = State()
     choosing_dept = State()
+    waiting_for_title = State()
     waiting_for_date = State()
     waiting_for_time = State()
     waiting_for_location = State()
