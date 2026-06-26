@@ -620,18 +620,21 @@ async def process_create_type(call: CallbackQuery, state: FSMContext):
     event_type = call.data.split("_")[1]
     await state.update_data(type=event_type)
     
-    if event_type == 'training':
-    await state.set_state(CreateEvent.waiting_for_title)
-    await message.answer("Введите название тренинга:")
-else: # для интервью
-    await state.set_state(CreateEvent.create_date)
+    if event_type == "interview":
+        await call.message.edit_text("Ввод данных. Укажите дату:", reply_markup=get_cancel_skip_kb(False))
+        await state.set_state(CreateEvent.waiting_for_date)
+    else:
+        await call.message.edit_text("Укажите департамент для тренинга:", reply_markup=get_departments_kb("tdept"))
+        await state.set_state(CreateEvent.choosing_dept)
 
 @dp.callback_query(F.data.startswith("tdept_"), CreateEvent.choosing_dept)
 async def process_create_dept(call: CallbackQuery, state: FSMContext):
     dept_map = {"tdept_pilots": "Пилоты", "tdept_ground": "Наземные службы", "tdept_cabin": "Бортпроводники"}
     await state.update_data(department=dept_map.get(call.data))
-    await call.message.edit_text("Ввод данных. Укажите дату:", reply_markup=get_cancel_skip_kb(False))
-    await state.set_state(CreateEvent.waiting_for_date)
+    
+    # После выбора департамента тренинга — переходим строго к НАЗВАНИЮ тренинга
+    await call.message.edit_text("Ввод данных. Укажите название тренинга:", reply_markup=get_cancel_skip_kb(False))
+    await state.set_state(CreateEvent.waiting_for_title)
 
 @dp.callback_query(F.data == "create_cancel", StateFilter(CreateEvent))
 async def cancel_creation(call: CallbackQuery, state: FSMContext):
@@ -657,7 +660,7 @@ async def process_creation_step(message: types.Message, state: FSMContext, is_sk
     if st == CreateEvent.waiting_for_title.state:
         await state.update_data(title=val)
         await state.set_state(CreateEvent.waiting_for_date)
-        await message.answer("Укажите дату проведения (например, 26.06.2026):", reply_markup=get_cancel_skip_kb(False))
+        await message.answer("Укажите дату проведения:", reply_markup=get_cancel_skip_kb(False))
 
     # 2. ШАГ: Ловим ДАТУ
     elif st == CreateEvent.waiting_for_date.state:
@@ -665,18 +668,16 @@ async def process_creation_step(message: types.Message, state: FSMContext, is_sk
         await state.set_state(CreateEvent.waiting_for_time)
         await message.answer("Укажите время:", reply_markup=get_cancel_skip_kb(False))
         
-    # 3. ШАГ: Ловим ВРЕМЯ и сразу завершаем (Место и Описание убраны)
+    # 3. ШАГ: Ловим ВРЕМЯ (Место и Описание убраны, сразу предпросмотр)
     elif st == CreateEvent.waiting_for_time.state:
         await state.update_data(time=val)
         await finalize_creation(message, state, user_obj)
-
 
 async def finalize_creation(message: types.Message, state: FSMContext, user_obj: types.User):
     data = await state.get_data()
     host = f"@{user_obj.username}" if user_obj.username else user_obj.first_name
     await state.update_data(host=host)
     
-    # Форматируем текст строго по ТЗ: между каждым пунктом строго одна пустая строка
     if data['type'] == 'interview':
         preview = (
             f"Тип: Интервью\n\n"
@@ -684,7 +685,7 @@ async def finalize_creation(message: types.Message, state: FSMContext, user_obj:
             f"Дата: {data.get('date')}\n\n"
             f"Время: {data.get('time')}"
         )
-    else:  # Для тренингов: Название на первой строчке, департамент убран из текста
+    else:  # Для тренингов: Название на первой строчке без слова "Тип"
         title_val = data.get('title', 'Без названия')
         preview = (
             f"{title_val}\n\n"
