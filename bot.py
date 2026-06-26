@@ -20,11 +20,14 @@ ITEMS_PER_PAGE = 7
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CREATOR_ID_ENV = os.getenv("CREATOR_ID")
+DISCORD_LINK = os.getenv("DISCORD_LINK")  # <-- ДОБАВЛЕНО
 
 if not BOT_TOKEN:
     raise ValueError("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения BOT_TOKEN не задана на хостинге!")
 if not CREATOR_ID_ENV:
     raise ValueError("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения CREATOR_ID не задана на хостинге!")
+if not DISCORD_LINK:
+    raise ValueError("КРИТИЧЕСКАЯ ОШИБКА: Переменная окружения DISCORD_LINK не задана на хостинге!")
 
 # Вот эта строчка ОБЯЗАТЕЛЬНО должна быть вверху файла без отступов:
 CREATOR_ID = int(CREATOR_ID_ENV)
@@ -145,7 +148,10 @@ async def init_db():
         except Exception:
             pass
             
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('interview_accept_msg', 'Ваш запрос на собеседование принят! Присоединитесь к нашему стаф-порталу (https://discord.gg/e459Y7GrNX) и напишите ваш ник в Discord для связи:')")
+        await db.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('interview_accept_msg', ?)",
+            (f"Ваш запрос на собеседование принят!\nПрисоединитесь к нашему стаф-порталу ({DISCORD_LINK}) и напишите ваш ник в Discord для связи:",)
+        )
             
         # Таблица для запросов
         await db.execute("""CREATE TABLE IF NOT EXISTS requests (
@@ -916,11 +922,10 @@ async def process_start_event(call: CallbackQuery):
         await db.execute("DELETE FROM bookings WHERE event_id = ?", (eid,))
         await db.commit()
 
-    # Скрипт текста для стажеров со ссылкой на дискорд
     discord_msg = (
         f"Ваше <b>{etype}</b> начинается прямо сейчас.\n"
         f"Для подключения пройдите по ссылке на наш Discord-сервер.\n\n"
-        f"🔗 <b>Ссылка:</b> https://discord.gg/ScfYXpnd5p"
+        f"🔗 <b>Ссылка:</b> {DISCORD_LINK}"
     )
 
     sent_count = 0
