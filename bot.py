@@ -81,6 +81,14 @@ class RequestAccept(StatesGroup):
 class ExamEvent(StatesGroup):
     waiting_for_id = State()
 
+class AddEvent(StatesGroup):
+    waiting_for_type = State()
+    waiting_for_dept = State()
+    waiting_for_title = State()
+    waiting_for_date = State()
+    waiting_for_time = State()
+    waiting_for_host = State()
+
 # === БАЗА ДАННЫХ ===
 async def init_db():
     db_file = Path(DB_PATH)
@@ -612,12 +620,11 @@ async def process_create_type(call: CallbackQuery, state: FSMContext):
     event_type = call.data.split("_")[1]
     await state.update_data(type=event_type)
     
-    if event_type == "interview":
-        await call.message.edit_text("Ввод данных. Укажите дату:", reply_markup=get_cancel_skip_kb(False))
-        await state.set_state(CreateEvent.waiting_for_date)
-    else:
-        await call.message.edit_text("Укажите департамент для тренинга:", reply_markup=get_departments_kb("tdept"))
-        await state.set_state(CreateEvent.choosing_dept)
+    if event_type == 'training':
+    await state.set_state(CreateEvent.waiting_for_title)
+    await message.answer("Введите название тренинга:")
+else: # для интервью
+    await state.set_state(CreateEvent.create_date)
 
 @dp.callback_query(F.data.startswith("tdept_"), CreateEvent.choosing_dept)
 async def process_create_dept(call: CallbackQuery, state: FSMContext):
@@ -636,8 +643,8 @@ async def skip_creation_step(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await process_creation_step(call.message, state, is_skip=True, user=call.from_user)
 
-@dp.message(StateFilter(CreateEvent.waiting_for_date, CreateEvent.waiting_for_time, 
-                        CreateEvent.waiting_for_location, CreateEvent.waiting_for_description))
+@dp.message(StateFilter(CreateEvent.waiting_for_title, CreateEvent.waiting_for_date, 
+                        CreateEvent.waiting_for_time))
 async def process_creation_step(message: types.Message, state: FSMContext, is_skip=False, user: types.User = None):
     user_obj = user if is_skip else message.from_user
     if not await is_admin(user_obj.id): return
@@ -646,41 +653,45 @@ async def process_creation_step(message: types.Message, state: FSMContext, is_sk
     val = " " if is_skip else message.text
     data = await state.get_data()
 
-    if st == CreateEvent.waiting_for_date.state:
+    # 1. ШАГ: Ловим НАЗВАНИЕ тренинга
+    if st == CreateEvent.waiting_for_title.state:
+        await state.update_data(title=val)
+        await state.set_state(CreateEvent.waiting_for_date)
+        await message.answer("Укажите дату проведения (например, 26.06.2026):", reply_markup=get_cancel_skip_kb(False))
+
+    # 2. ШАГ: Ловим ДАТУ
+    elif st == CreateEvent.waiting_for_date.state:
         await state.update_data(date=val)
         await state.set_state(CreateEvent.waiting_for_time)
         await message.answer("Укажите время:", reply_markup=get_cancel_skip_kb(False))
         
+    # 3. ШАГ: Ловим ВРЕМЯ и сразу завершаем (Место и Описание убраны)
     elif st == CreateEvent.waiting_for_time.state:
         await state.update_data(time=val)
-        if data['type'] == 'interview':
-            await finalize_creation(message, state, user_obj)
-        else:
-            await state.set_state(CreateEvent.waiting_for_location)
-            await message.answer("Укажите место проведения:", reply_markup=get_cancel_skip_kb(False))
-            
-    elif st == CreateEvent.waiting_for_location.state:
-        await state.update_data(location=val)
-        await state.set_state(CreateEvent.waiting_for_description)
-        await message.answer("Укажите описание:", reply_markup=get_cancel_skip_kb(False))
-        
-    elif st == CreateEvent.waiting_for_description.state:
-        await state.update_data(description=val)
         await finalize_creation(message, state, user_obj)
+
 
 async def finalize_creation(message: types.Message, state: FSMContext, user_obj: types.User):
     data = await state.get_data()
     host = f"@{user_obj.username}" if user_obj.username else user_obj.first_name
     await state.update_data(host=host)
     
-    preview = f"Тип: {'Интервью' if data['type'] == 'interview' else 'Тренинг'}\n\n"
-    if data['type'] == 'training':
-        preview += f"Департамент: {data.get('department')}\n\n"
-        
-    preview += f"Дата: {data.get('date')}\n\nВремя: {data.get('time')}\n\n"
-    
-    if data['type'] == 'training':
-        preview += f"Место: {data.get('location', ' ')}\n\nОписание: {data.get('description', ' ')}\n\n"
+    # Форматируем текст строго по ТЗ: между каждым пунктом строго одна пустая строка
+    if data['type'] == 'interview':
+        preview = (
+            f"Тип: Интервью\n\n"
+            f"Хост: {host}\n\n"
+            f"Дата: {data.get('date')}\n\n"
+            f"Время: {data.get('time')}"
+        )
+    else:  # Для тренингов: Название на первой строчке, департамент убран из текста
+        title_val = data.get('title', 'Без названия')
+        preview = (
+            f"{title_val}\n\n"
+            f"Хост: {host}\n\n"
+            f"Дата: {data.get('date')}\n\n"
+            f"Время: {data.get('time')}"
+        )
         
     b = InlineKeyboardBuilder()
     b.button(text="Подтвердить ✅", callback_data="confirm_event")
@@ -752,25 +763,28 @@ async def cmd_training(message: types.Message):
 @dp.callback_query(F.data.startswith("book_select_"))
 async def select_booking_slot(call: CallbackQuery):
     uid = call.from_user.id
-    if not await is_active_trainee(uid): return await call.answer("Доступ закрыт.", show_alert=True)
-    
+    if not await is_active_trainee(uid): 
+        return await call.answer("Доступ закрыт.", show_alert=True)
+        
     event_id = int(call.data.split("_")[2])
     
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT type, date, time, location, description, host_name FROM events WHERE id = ?", (event_id,)) as c:
+        # Явно запрашиваем название (title) и остальные нужные поля
+        async with db.execute("SELECT title, host_name, date, time FROM events WHERE id = ?", (event_id,)) as c:
             event = await c.fetchone()
             
-    if not event: return await call.answer("Слот не найден.", show_alert=True)
-    
-    etype, edate, etime, eloc, edesc, ehost = event
-    
-    if etype == 'training':
-        text = f"Хост: {ehost}\n\nДата: {edate}\n\nВремя: {etime}\n\nДля записи нажмите на кнопку ниже."
-    else:
-        text = f"Хост: {ehost}\n\nДата: {edate}\n\nВремя: {etime}\n\nДля записи нажмите на кнопку ниже."
+    if not event: 
+        return await call.answer("Слот не найден.", show_alert=True)
         
+    title, ehost, edate, etime = event
+    title_val = title if title else "Без названия"
+    
+    # ВАРИАНТ А: Если хочешь, чтобы первая строчка содержала просто текст названия:
+    text = f"{title_val}\n\nХост: {ehost}\n\nДата: {edate}\n\nВремя: {etime}\n\nДля записи нажмите на кнопку ниже."
+    
     b = InlineKeyboardBuilder()
     b.button(text="Записаться ✅", callback_data=f"confirmbook_{event_id}")
+    
     await call.message.edit_text(text, reply_markup=b.as_markup())
 
 @dp.callback_query(F.data.startswith("confirmbook_"))
@@ -975,35 +989,50 @@ async def cmd_my_events(message: types.Message):
         b.adjust(1)
         await message.answer(f"Слот: {name} | {edate} в {etime}", reply_markup=b.as_markup())
 
-# Пример вашей функции, которая обрабатывает нажатие кнопки "Посмотреть записавшихся"
-@dp.callback_query(F.data.startswith("view_event_")) # Название вашего фильтра может отличаться
-async def view_event_participants(call: types.CallbackQuery):
-    # Здесь вы получаете event_id из коллбэка
-    event_id = int(call.data.split("_")[2]) 
+@dp.callback_query(F.data.startswith("whobooked_"))
+async def view_booked_users(call: types.CallbackQuery):
+    event_id = int(call.data.split("_")[1])
     
-    # --- НАЧАЛО ВСТАВЛЕННОГО БЛОКА ---
-    # Обратите внимание: всё это сдвинуто вправо (4 пробела), 
-    # чтобы находиться ВНУТРИ функции async def
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("""
-            SELECT u.user_id, u.username, u.department
-            FROM bookings b
-            JOIN users u ON b.user_id = u.user_id
-            WHERE b.event_id = ?
-        """, (event_id,)) as c:
-            enrolled = await c.fetchall()
+        # Получаем данные о самом мероприятии
+        async with db.execute("SELECT type, department, date, time, title FROM events WHERE id = ?", (event_id,)) as c:
+            event = await c.fetchone()
+            
+        if not event:
+            await call.answer("❌ Слот не найден.", show_alert=True)
+            return
+            
+        # ИСПРАВЛЕНО: берем строго 4 существующие колонки, чтобы распаковка не падала
+        async with db.execute(
+            """SELECT u.user_id, u.username, u.department, u.stage 
+               FROM users u 
+               JOIN bookings b ON u.user_id = b.user_id 
+               WHERE b.event_id = ?""", (event_id,)
+        ) as c:
+            booked_users = await c.fetchall()
 
-    if not enrolled:
-        text = "На это мероприятие пока никто не записался."
+    title = event[4] if event[4] else "Без названия"
+    text = f"📋 <b>Записались на: {title}</b> ({event[2]} в {event[3]})\n\n"
+    
+    if not booked_users:
+        text += "Пока никто не записался."
     else:
-        text = "📋 <b>Список записавшихся:</b>\n\n"
-        for uid, username, dept in enrolled:
-            display_name = f"@{username}" if username and not username.startswith("@") else username if username else f"Стажер {uid}"
+        # ИСПРАВЛЕНО: Безопасный перебор 4-х параметров
+        for uid, username, dept, stage in booked_users:
+            display_name = f"@{username}" if username else f"Стажер {uid}"
             safe_name = html.quote(display_name)
-            text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>) — {dept}\n"
-    # --- КОНЕЦ ВСТАВЛЕННОГО БЛОКА ---
+            text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>)\nДеп: {dept} | Этап: {stage}\n\n"
 
-    # И затем отправляете этот текст:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад к слоту", callback_data=f"viewevent_{event_id}")
+    
+    try:
+        await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+    except Exception as e:
+        logging.error(f"Ошибка вывода списка записавшихся: {e}")
+        
+    await call.answer()
+    
     await call.message.edit_text(text, parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("delevent_"))
