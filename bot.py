@@ -106,7 +106,7 @@ async def init_db():
             department TEXT,
             stage TEXT,
             is_active INTEGER DEFAULT 1
-        )""") [cite: 171, 172]
+        )""")
         
         # Структура таблицы событий (тренинги, интервью)
         await db.execute("""CREATE TABLE IF NOT EXISTS events (
@@ -118,43 +118,43 @@ async def init_db():
             location TEXT,
             description TEXT,
             host_name TEXT
-        )""") [cite: 172, 173, 174]
+        )""")
 
         await db.execute("""CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
-        )""") [cite: 174]
+        )""")
         
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_template', 'Появился новый слот!\nДепартамент: {dept}\nТип: {type}')") [cite: 174, 15]
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('notify_template', 'Появился новый слот!\nДепартамент: {dept}\nТип: {type}')")
         
         await db.execute("""CREATE TABLE IF NOT EXISTS bookings (
             event_id INTEGER,
             user_id INTEGER,
             PRIMARY KEY(event_id, user_id)
-        )""") [cite: 174, 175, 15]
+        )""")
         
         # Добавляем базовый текст экзамена, если его нет
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('exam_text', 'Ссылка на экзамен пока не задана.')") [cite: 175, 176, 15]
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('exam_text', 'Ссылка на экзамен пока не задана.')")
         
         # === МИГРАЦИИ (Добавление колонок в старые БД на хостинге) ===
         try:
             await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
         except Exception:
-            pass [cite: 176, 15]
+            pass
 
         try:
             await db.execute("ALTER TABLE tickets ADD COLUMN admin_id INTEGER")
         except Exception:
-            pass [cite: 176, 177, 15]
+            pass
             
-        # НАШ НОВЫЙ БЛОК (С ИСПРАВЛЕННЫМИ ОТСТУПАМИ)
+        # НАШ НОВЫЙ БЛОК ДЛЯ СТОЛБЦА TITLE
         try:
             await db.execute("ALTER TABLE events ADD COLUMN title TEXT DEFAULT ''")
             await db.commit()
         except Exception:
             pass
             
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('interview_accept_msg', 'Ваш запрос на собеседование принят!\nПрисоединитесь к нашему стаф-порталу (https://discord.gg/e459Y7GrNX) и напишите ваш ник в Discord для связи:')") [cite: 177, 178, 15, 16]
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('interview_accept_msg', 'Ваш запрос на собеседование принят!\nПрисоединитесь к нашему стаф-порталу (https://discord.gg/e459Y7GrNX) и напишите ваш ник в Discord для связи:')")
             
         # Таблица для запросов
         await db.execute("""CREATE TABLE IF NOT EXISTS requests (
@@ -163,21 +163,21 @@ async def init_db():
             department TEXT,
             type TEXT,
             datetime TEXT
-        )""") [cite: 178, 179, 16]
+        )""")
 
         await db.execute("""CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             question TEXT,
             status TEXT DEFAULT 'open'
-        )""") [cite: 179, 180, 16]
+        )""")
 
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pass_msg', 'С радостью сообщаем, что Вы успешно прошли все три этапа отборочного процесса. Отдел Кадров высоко оценил Ваш уровень компетенций и опыт, которые в полной мере соответствуют нашим требованиям и ожиданиям. Мы были впечатлены Вашими результатами на каждом из этапов. Для дальнейших инструкций обратитесь @antoninaiivanovna')") [cite: 180, 16, 17, 18]
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('fail_msg', 'Информируем вас, что по результатам экзамена ваша кандидатура не была утверждена департаментом кадров.\nК сожалению, текущий результат не соответствует установленным требованиям для данной позиции.\nВы можете повторно направить заявку на участие в следующем отборочном туре.')") [cite: 180, 181, 182, 18]
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('requests_enabled', '1')") [cite: 182, 18]
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pass_msg', 'С радостью сообщаем, что Вы успешно прошли все три этапа отборочного процесса. Отдел Кадров высоко оценил Ваш уровень компетенций и опыт, которые в полной мере соответствуют нашим требованиям и ожиданиям. Мы были впечатлены Вашими результатами на каждом из этапов. Для дальнейших инструкций обратитесь @antoninaiivanovna')")
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('fail_msg', 'Информируем вас, что по результатам экзамена ваша кандидатура не была утверждена департаментом кадров.\nК сожалению, текущий результат не соответствует установленным требованиям для данной позиции.\nВы можете повторно направить заявку на участие в следующем отборочном туре.')")
+        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('requests_enabled', '1')")
         
-        await db.commit() [cite: 182]
-
+        await db.commit()
+        
 # === ПРОВЕРКИ ПРАВ ===
 async def get_user_data(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
