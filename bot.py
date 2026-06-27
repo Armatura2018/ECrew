@@ -172,6 +172,14 @@ async def init_db():
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('pass_msg', 'С радостью сообщаем, что Вы успешно прошли все три этапа отборочного процесса. Отдел Кадров высоко оценил Ваш уровень компетенций и опыт, которые в полной мере соответствуют нашим требованиям и ожиданиям. Мы были впечатлены Вашими результатами на каждом из этапов. Для дальнейших инструкций обратитесь @antoninaiivanovna')")
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('fail_msg', 'Информируем вас, что по результатам экзамена ваша кандидатура не была утверждена департаментом кадров. К сожалению, текущий результат не соответствует установленным требованиям для данной позиции. Вы можете повторно направить заявку на участие в следующем отборочном туре.')")
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('requests_enabled', '1')")
+
+        try:
+        # Автоматически добавляем колонку title, если её нет на хостинге
+        await db.execute("ALTER TABLE events ADD COLUMN title TEXT DEFAULT ''")
+        await db.commit()
+    except aiosqlite.OperationalError:
+        # Если колонка уже есть, sqlite выдаст ошибку, мы её просто игнорируем
+        pass
         
         await db.commit()
 
@@ -710,15 +718,29 @@ async def finalize_creation(message: types.Message, state: FSMContext, user_obj:
 
 @dp.callback_query(F.data == "confirm_event", CreateEvent.confirming)
 async def confirm_event(call: CallbackQuery, state: FSMContext):
-    d = await state.get_data()
+    # ... тут твой код получения данных и проверки админа ...
+    data = await state.get_data()
+    
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""INSERT INTO events (type, department, date, time, location, description, host_name) 
-                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                         (d['type'], d.get('department'), d.get('date'), d.get('time'), 
-                          d.get('location', ' '), d.get('description', ' '), d['host']))
+        # ОБНОВЛЕННЫЙ ЗАПРОС (добавлено поле title в начало)
+        await db.execute(
+            "INSERT INTO events (title, type, department, host_name, date, time, location, description) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                data.get("title", ""),  # <-- Название тренинга (или пустота для интервью)
+                data["type"],
+                data.get("department", " "),
+                data["host"],
+                data["date"],
+                data["time"],
+                " ", # место проведения больше не запрашиваем, пишем заглушку
+                " "  # описание больше не запрашиваем, пишем заглушку
+            )
+        )
         await db.commit()
-    await call.message.edit_text("Слот успешно создан.")
+
     await state.clear()
+    await call.message.edit_text("Мероприятие успешно создано и внесено в расписание!")
 
 # === СИСТЕМА СТАЖЕРОВ (ВЗАИМОДЕЙСТВИЕ) ===
 @dp.message(Command("profile"), F.chat.type == "private")
