@@ -244,10 +244,52 @@ async def cmd_add_head(message: types.Message):
     if len(args) != 2 or not args[1].isdigit():
         return await message.answer("Формат: /add_head <ID пользователя>")
     uid = int(args[1])
+    
     async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT role FROM users WHERE user_id = ?", (uid,)) as c:
+            if await c.fetchone():
+                return await message.answer("❌ Ошибка: Этот пользователь уже существует в системе.")
+        
         await db.execute("INSERT OR REPLACE INTO users (user_id, role, is_active) VALUES (?, 'head_admin', 1)", (uid,))
         await db.commit()
     await message.answer("Пользователь назначен главным администратором.")
+
+
+@dp.message(Command("add_admin"), F.chat.type == "private")
+async def cmd_add_admin(message: types.Message):
+    if not await is_head_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await message.answer("Формат: /add_admin <ID пользователя>")
+    uid = int(args[1])
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT role FROM users WHERE user_id = ?", (uid,)) as c:
+            if await c.fetchone():
+                return await message.answer("❌ Ошибка: Этот пользователь уже существует в системе.")
+                
+        await db.execute("INSERT OR REPLACE INTO users (user_id, role, is_active) VALUES (?, 'admin', 1)", (uid,))
+        await db.commit()
+    await message.answer("Пользователь назначен администратором.")
+
+
+@dp.message(Command("add_trainee"), F.chat.type == "private")
+async def cmd_add_trainee(message: types.Message, state: FSMContext):
+    if not await is_head_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await message.answer("Формат: /add_trainee <ID пользователя>")
+    
+    uid = int(args[1])
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT role FROM users WHERE user_id = ?", (uid,)) as c:
+            if await c.fetchone():
+                return await message.answer("❌ Ошибка: Этот пользователь уже существует в системе.")
+    
+    await state.update_data(target_id=uid)
+    await message.answer("Укажите департамент для стажера:", reply_markup=get_departments_kb("dept"))
+    await state.set_state(AddTrainee.waiting_for_dept)
 
 @dp.message(Command("mass_send"), F.chat.type == "private")
 async def cmd_mass_send(message: types.Message, state: FSMContext):
@@ -308,30 +350,6 @@ async def cb_text_receive(message: types.Message, state: FSMContext):
             
     await message.answer(f"✅ Рассылка завершена!\nПолучили сообщение: {count} стажеров.")
     await state.clear()
-
-@dp.message(Command("add_admin"), F.chat.type == "private")
-async def cmd_add_admin(message: types.Message):
-    if not await is_head_admin(message.from_user.id): return
-    args = message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        return await message.answer("Формат: /add_admin <ID пользователя>")
-    uid = int(args[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO users (user_id, role, is_active) VALUES (?, 'admin', 1)", (uid,))
-        await db.commit()
-    await message.answer("Пользователь назначен администратором.")
-
-@dp.message(Command("add_trainee"), F.chat.type == "private")
-async def cmd_add_trainee(message: types.Message, state: FSMContext):
-    if not await is_head_admin(message.from_user.id): return
-    args = message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        return await message.answer("Формат: /add_trainee <ID пользователя>")
-    
-    uid = int(args[1])
-    await state.update_data(target_id=uid)
-    await message.answer("Укажите департамент для стажера:", reply_markup=get_departments_kb("dept"))
-    await state.set_state(AddTrainee.waiting_for_dept)
 
 @dp.callback_query(F.data.startswith("dept_"), AddTrainee.waiting_for_dept)
 async def process_add_trainee_dept(call: CallbackQuery, state: FSMContext):
@@ -1008,17 +1026,18 @@ async def cmd_my_events(message: types.Message):
     for eid, etype, edate, etime in events:
         name = "Интервью" if etype == "interview" else "Тренинг"
         b = InlineKeyboardBuilder()
-        b.button(text="Кто записался? 👥", callback_data=f"viewevent_{eid}")
+        # ИСПРАВЛЕНИЕ ТУТ: Поменяли viewevent_ на whobooked_
+        b.button(text="Кто записался? 👥", callback_data=f"whobooked_{eid}")
         b.button(text="Удалить слот 🗑", callback_data=f"delevent_{eid}")
         b.adjust(1)
         await message.answer(f"Слот: {name} | {edate} в {etime}", reply_markup=b.as_markup())
+
 
 @dp.callback_query(F.data.startswith("whobooked_"))
 async def view_booked_users(call: types.CallbackQuery):
     event_id = int(call.data.split("_")[1])
     
     async with aiosqlite.connect(DB_PATH) as db:
-        # Получаем данные о самом мероприятии
         async with db.execute("SELECT type, department, date, time, title FROM events WHERE id = ?", (event_id,)) as c:
             event = await c.fetchone()
             
@@ -1026,7 +1045,6 @@ async def view_booked_users(call: types.CallbackQuery):
             await call.answer("❌ Слот не найден.", show_alert=True)
             return
             
-        # ИСПРАВЛЕНО: берем строго 4 существующие колонки, чтобы распаковка не падала
         async with db.execute(
             """SELECT u.user_id, u.username, u.department, u.stage 
                FROM users u 
@@ -1041,23 +1059,18 @@ async def view_booked_users(call: types.CallbackQuery):
     if not booked_users:
         text += "Пока никто не записался."
     else:
-        # ИСПРАВЛЕНО: Безопасный перебор 4-х параметров
         for uid, username, dept, stage in booked_users:
             display_name = f"@{username}" if username else f"Стажер {uid}"
             safe_name = html.quote(display_name)
             text += f"👤 <a href='tg://user?id={uid}'>{safe_name}</a> (<code>{uid}</code>)\nДеп: {dept} | Этап: {stage}\n\n"
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⬅️ Назад к слоту", callback_data=f"viewevent_{event_id}")
     
     try:
-        await call.message.edit_text(text, parse_mode="HTML", reply_markup=kb.as_markup())
+        # Убрана нерабочая кнопка "Назад", теперь выводится просто красивый список
+        await call.message.edit_text(text, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка вывода списка записавшихся: {e}")
         
     await call.answer()
-    
-    await call.message.edit_text(text, parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("delevent_"))
 async def process_delete_event(call: CallbackQuery):
