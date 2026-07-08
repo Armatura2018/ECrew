@@ -246,9 +246,10 @@ async def cmd_add_head(message: types.Message):
     uid = int(args[1])
     
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT role FROM users WHERE user_id = ?", (uid,)) as c:
+        # Проверяем, есть ли уже АКТИВНЫЙ пользователь с таким ID
+        async with db.execute("SELECT role FROM users WHERE user_id = ? AND is_active = 1", (uid,)) as c:
             if await c.fetchone():
-                return await message.answer("❌ Ошибка: Этот пользователь уже существует в системе.")
+                return await message.answer("❌ Ошибка: Этот пользователь уже активно числится в системе.")
         
         await db.execute("INSERT OR REPLACE INTO users (user_id, role, is_active) VALUES (?, 'head_admin', 1)", (uid,))
         await db.commit()
@@ -264,9 +265,9 @@ async def cmd_add_admin(message: types.Message):
     uid = int(args[1])
     
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT role FROM users WHERE user_id = ?", (uid,)) as c:
+        async with db.execute("SELECT role FROM users WHERE user_id = ? AND is_active = 1", (uid,)) as c:
             if await c.fetchone():
-                return await message.answer("❌ Ошибка: Этот пользователь уже существует в системе.")
+                return await message.answer("❌ Ошибка: Этот пользователь уже активно числится в системе.")
                 
         await db.execute("INSERT OR REPLACE INTO users (user_id, role, is_active) VALUES (?, 'admin', 1)", (uid,))
         await db.commit()
@@ -283,14 +284,14 @@ async def cmd_add_trainee(message: types.Message, state: FSMContext):
     uid = int(args[1])
     
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT role FROM users WHERE user_id = ?", (uid,)) as c:
+        async with db.execute("SELECT role FROM users WHERE user_id = ? AND is_active = 1", (uid,)) as c:
             if await c.fetchone():
-                return await message.answer("❌ Ошибка: Этот пользователь уже существует в системе.")
+                return await message.answer("❌ Ошибка: Этот пользователь уже активно числится в системе.")
     
     await state.update_data(target_id=uid)
     await message.answer("Укажите департамент для стажера:", reply_markup=get_departments_kb("dept"))
     await state.set_state(AddTrainee.waiting_for_dept)
-
+    
 @dp.message(Command("mass_send"), F.chat.type == "private")
 async def cmd_mass_send(message: types.Message, state: FSMContext):
     if not await is_creator(message.from_user.id): return
@@ -414,6 +415,34 @@ async def cmd_advance(message: types.Message):
         await db.commit()
         
     await message.answer(f"Статус стажера обновлен. Текущий этап: {next_stage}.")
+
+@dp.message(Command("demote"), F.chat.type == "private")
+async def cmd_demote(message: types.Message):
+    if not await is_head_admin(message.from_user.id): return
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        return await message.answer("Формат: /demote <ID пользователя>")
+        
+    uid = int(args[1])
+    data = await get_user_data(uid)
+    
+    if not data or data[0] != 'trainee':
+        return await message.answer("Пользователь не найден или не является стажером.")
+        
+    current_stage = data[2]
+    prev_stage = ""
+    
+    # Логика понижения (обратная команде advance)
+    if current_stage == "Завершено": prev_stage = "Экзамен"
+    elif current_stage == "Экзамен": prev_stage = "Тренинг"
+    elif current_stage == "Тренинг": prev_stage = "Интервью"
+    else: return await message.answer("❌ Стажер уже находится на самом первом этапе (Интервью).")
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET stage = ? WHERE user_id = ?", (prev_stage, uid))
+        await db.commit()
+        
+    await message.answer(f"Статус стажера успешно понижен. Текущий этап: {prev_stage}.")
 
 @dp.message(Command("kick"), F.chat.type == "private")
 async def cmd_kick(message: types.Message):
